@@ -17,6 +17,10 @@
 #include <getopt.h>
 #include <stdlib.h>
 #include <string.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <poll.h>
+#include <sys/inotify.h>
 #include <sys/mman.h>
 #include <unistd.h>
 #include <wayland-client-protocol.h>
@@ -243,6 +247,98 @@ static void handle_keyboard_keymap(
         );
     }
     seat->xkb_state = xkb_state_new(seat->xkb_keymap);
+}
+
+// --- key channel -----------------------------------------------------------
+// A file the compositor appends keysym names to, one per line, read here
+// instead of a wl_keyboard. Enabled with WL_KBPTR_KEY_CHANNEL=<path>.
+//
+// A plain file rather than a fifo or a socket: the writer is the compositor's
+// own config thread, and opening a fifo that has no reader blocks whoever
+// opens it -- a wedged compositor is a worse failure than a lost keystroke.
+// Appending to a file can never block, in any order of startup or teardown.
+static const char *key_channel_path = NULL;
+static int         key_channel_fd   = -1;
+static int         key_channel_wd   = -1;
+static off_t       key_channel_off  = 0;
+
+static void key_channel_open(struct state *state) {
+    // Truncate: anything written before this overlay existed was meant for a
+    // previous one, and replaying it would type into the wrong overlay.
+    int fd = open(key_channel_path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (fd >= 0) {
+        close(fd);
+    }
+
+    key_channel_fd = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
+    if (key_channel_fd < 0) {
+        LOG_ERR("Failed to watch the key channel.");
+        return;
+    }
+    key_channel_wd =
+        inotify_add_watch(key_channel_fd, key_channel_path, IN_MODIFY);
+    if (key_channel_wd < 0) {
+        LOG_ERR("Failed to watch the key channel file.");
+        close(key_channel_fd);
+        key_channel_fd = -1;
+    }
+}
+
+// One line of the channel, handled exactly as a key press off a wl_keyboard.
+static void key_channel_handle_line(struct state *state, char *line) {
+    if (*line == 0) {
+        return;
+    }
+
+    char         text[64];
+    xkb_keysym_t key_sym = xkb_keysym_from_name(line, XKB_KEYSYM_NO_FLAGS);
+    if (key_sym == XKB_KEY_NoSymbol) {
+        key_sym =
+            xkb_keysym_from_name(line, XKB_KEYSYM_CASE_INSENSITIVE);
+    }
+    if (key_sym == XKB_KEY_NoSymbol) {
+        return;
+    }
+    xkb_keysym_to_utf8(key_sym, text, sizeof(text));
+
+    bool redraw = mode_handle_key(state, key_sym, text);
+    if (has_last_mode_returned(state)) {
+        state->running = false;
+    } else if (redraw) {
+        request_frame(state);
+    }
+}
+
+// Drain whatever the compositor appended since the last read.
+static void key_channel_drain(struct state *state) {
+    char buf[4096];
+    while (read(key_channel_fd, buf, sizeof(buf)) > 0) {}
+
+    int fd = open(key_channel_path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) {
+        return;
+    }
+    if (lseek(fd, key_channel_off, SEEK_SET) < 0) {
+        close(fd);
+        return;
+    }
+
+    char    line[256];
+    size_t  len = 0;
+    ssize_t n;
+    while ((n = read(fd, buf, sizeof(buf))) > 0) {
+        key_channel_off += n;
+        for (ssize_t i = 0; i < n; i++) {
+            if (buf[i] == '\n') {
+                line[len] = 0;
+                key_channel_handle_line(state, line);
+                len = 0;
+            } else if (len < sizeof(line) - 1) {
+                line[len++] = buf[i];
+            }
+        }
+    }
+    close(fd);
 }
 
 static void handle_keyboard_key(
@@ -656,6 +752,13 @@ static void print_version() {
 }
 
 int main(int argc, char **argv) {
+    // Set by whoever launches us when the compositor, not a wl_keyboard, is
+    // the thing that will be feeding us keys. See key_channel_open.
+    key_channel_path = getenv("WL_KBPTR_KEY_CHANNEL");
+    if (key_channel_path != NULL && *key_channel_path == 0) {
+        key_channel_path = NULL;
+    }
+
     struct state state = {
         .wl_display          = NULL,
         .wl_registry         = NULL,
@@ -884,8 +987,13 @@ int main(int argc, char **argv) {
                                     ZWLR_LAYER_SURFACE_V1_ANCHOR_TOP |
                                     ZWLR_LAYER_SURFACE_V1_ANCHOR_BOTTOM
     );
+    // Taking keyboard focus is what dismisses an xdg-popup: the compositor
+    // drops the popup's seat grab when a layer surface with any keyboard
+    // interactivity but NONE maps, and the client is told its popup is done.
+    // With a key channel we are fed keys by the compositor instead and never
+    // ask for focus, so a menu or an extension popup stays open underneath.
     zwlr_layer_surface_v1_set_keyboard_interactivity(
-        state.wl_layer_surface, true
+        state.wl_layer_surface, key_channel_path == NULL
     );
 
     struct wp_fractional_scale_v1 *fractional_scale = NULL;
@@ -907,7 +1015,57 @@ int main(int argc, char **argv) {
     wl_surface_set_input_region(state.wl_surface, wl_region);
 
     wl_surface_commit(state.wl_surface);
-    while (state.running && wl_display_dispatch(state.wl_display)) {}
+
+    if (key_channel_path == NULL) {
+        while (state.running && wl_display_dispatch(state.wl_display)) {}
+    } else {
+        // Two sources now -- the display and the key channel -- so the loop
+        // has to wait on both. This is the standard Wayland prepare/read
+        // dance: without it, events queued between the poll and the read are
+        // events we sleep through.
+        key_channel_open(&state);
+
+        struct pollfd fds[2] = {
+            {.fd = wl_display_get_fd(state.wl_display), .events = POLLIN},
+            {.fd = key_channel_fd, .events = POLLIN},
+        };
+
+        while (state.running) {
+            while (wl_display_prepare_read(state.wl_display) != 0) {
+                if (wl_display_dispatch_pending(state.wl_display) < 0) {
+                    goto loop_done;
+                }
+            }
+            if (wl_display_flush(state.wl_display) < 0 && errno != EAGAIN) {
+                wl_display_cancel_read(state.wl_display);
+                goto loop_done;
+            }
+
+            if (poll(fds, key_channel_fd < 0 ? 1 : 2, -1) < 0) {
+                wl_display_cancel_read(state.wl_display);
+                if (errno == EINTR) {
+                    continue;
+                }
+                goto loop_done;
+            }
+
+            if (fds[0].revents & POLLIN) {
+                if (wl_display_read_events(state.wl_display) < 0) {
+                    goto loop_done;
+                }
+            } else {
+                wl_display_cancel_read(state.wl_display);
+            }
+
+            if (wl_display_dispatch_pending(state.wl_display) < 0) {
+                goto loop_done;
+            }
+            if (state.running && (fds[1].revents & POLLIN)) {
+                key_channel_drain(&state);
+            }
+        }
+    loop_done:;
+    }
 
     // The frame callback holds a pointer to the surface and to the buffer
     // pool, both destroyed just below. Left armed, it is still dispatched by

@@ -358,7 +358,8 @@ void split_mode_free(void *mode_state) {
 }
 
 struct mode_interface split_mode_interface = {
-    .name    = "split",
+    .name        = "split",
+    .takes_space = true,
     .enter   = split_mode_enter,
     .reenter = split_mode_reenter,
     .key     = split_mode_key,

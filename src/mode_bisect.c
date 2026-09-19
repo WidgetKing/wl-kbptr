@@ -516,7 +516,8 @@ void bisect_mode_free(void *mode_state) {
 }
 
 struct mode_interface bisect_mode_interface = {
-    .name    = "bisect",
+    .name        = "bisect",
+    .takes_space = true,
     .enter   = bisect_mode_enter,
     .reenter = bisect_mode_reenter,
     .key     = bisect_mode_key,

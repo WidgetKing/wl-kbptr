@@ -11,6 +11,10 @@ struct general_config {
     char  **home_row_keys;
     char   *modes;
     uint8_t cancellation_status_code;
+    // What the whole overlay fades to while the peek key is held. 1 disables
+    // the peek: the overlay is already fully drawn, so holding the key has
+    // nothing to do.
+    double peek_alpha;
 };
 
 struct relative_font_size {

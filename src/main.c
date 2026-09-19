@@ -51,7 +51,30 @@ static void send_frame(struct state *state) {
     cairo_t *cairo = surface_buffer->cairo;
     cairo_identity_matrix(cairo);
     cairo_scale(cairo, scale_120 / 120.0, scale_120 / 120.0);
-    mode_render(state, cairo);
+    if (state->peeking) {
+        // Peek: draw the overlay into a group and composite the whole thing at
+        // a low alpha, so what is underneath can be read through it. Done here
+        // rather than by scaling every colour because it is the *overlay* that
+        // is being faded, not one of its parts -- dimming, labels, borders and
+        // the bisect pointer all go together, and no mode has to know.
+        //
+        // Buffers are recycled, so the destination still holds the last frame
+        // drawn into it. A mode normally overwrites every pixel of it; a group
+        // composited on top does not, so it has to be cleared first or the
+        // previous frame shows through at full strength underneath.
+        cairo_save(cairo);
+        cairo_set_operator(cairo, CAIRO_OPERATOR_SOURCE);
+        cairo_set_source_rgba(cairo, 0, 0, 0, 0);
+        cairo_paint(cairo);
+        cairo_restore(cairo);
+
+        cairo_push_group(cairo);
+        mode_render(state, cairo);
+        cairo_pop_group_to_source(cairo);
+        cairo_paint_with_alpha(cairo, state->config.general.peek_alpha);
+    } else {
+        mode_render(state, cairo);
+    }
 
     wl_surface_set_buffer_scale(state->wl_surface, 1);
 
@@ -114,6 +137,27 @@ static void request_frame(struct state *state) {
         state->wl_surface_callback, &surface_callback_listener, state
     );
     wl_surface_commit(state->wl_surface);
+}
+
+// Hold a key, see through the overlay. The whole surface is the plugin's one
+// blind spot: it covers the very thing being aimed at, and a label that lands
+// on top of the word you were reading is the common way a selection goes
+// wrong. Holding the key fades the overlay almost away without disturbing it,
+// so the labels stay where they are and the target underneath becomes legible.
+//
+// Refused in two cases, both of them "space already means something here":
+// a mode that commits on space (bisect, split -- where a peek would fire a
+// click instead), and peek_alpha = 1, which is how the feature is turned off.
+static void peek_set(struct state *state, bool peeking) {
+    if (state->config.general.peek_alpha >= 1 || mode_takes_space(state)) {
+        return;
+    }
+    if (state->peeking == peeking) {
+        return;
+    }
+
+    state->peeking = peeking;
+    request_frame(state);
 }
 
 bool compute_initial_area(struct state *state, struct rect *initial_area) {
@@ -284,8 +328,25 @@ static void key_channel_open(struct state *state) {
     }
 }
 
-// One line of the channel, handled exactly as a key press off a wl_keyboard.
+// One line of the channel, handled exactly as a key off a wl_keyboard.
+//
+// A bare keysym name is a press, which is every line the compositor wrote
+// before peeking existed and is why the prefix marks the new case rather than
+// both: an older imthemousenow driving a newer wl-kbptr keeps working, and its
+// keys are not silently reinterpreted.
+//
+//   space    press
+//   -space   release
+//
+// Only the keys that care about being let go are worth relaying twice, so a
+// release for anything else simply finds nothing to do.
 static void key_channel_handle_line(struct state *state, char *line) {
+    bool pressed = true;
+    if (*line == '-') {
+        pressed = false;
+        line++;
+    }
+
     if (*line == 0) {
         return;
     }
@@ -300,6 +361,15 @@ static void key_channel_handle_line(struct state *state, char *line) {
         return;
     }
     xkb_keysym_to_utf8(key_sym, text, sizeof(text));
+
+    if (key_sym == XKB_KEY_space && !mode_takes_space(state)) {
+        peek_set(state, pressed);
+        return;
+    }
+
+    if (!pressed) {
+        return;
+    }
 
     bool redraw = mode_handle_key(state, key_sym, text);
     if (has_last_mode_returned(state)) {
@@ -351,6 +421,13 @@ static void handle_keyboard_key(
     const xkb_keysym_t  key_sym =
         xkb_state_key_get_one_sym(seat->xkb_state, key_code);
     xkb_keysym_to_utf8(key_sym, text, sizeof(text));
+
+    if (key_sym == XKB_KEY_space && !mode_takes_space(seat->state)) {
+        peek_set(
+            seat->state, key_state == WL_KEYBOARD_KEY_STATE_PRESSED
+        );
+        return;
+    }
 
     if (key_state == WL_KEYBOARD_KEY_STATE_PRESSED) {
         bool redraw = mode_handle_key(seat->state, key_sym, text);

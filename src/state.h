@@ -138,6 +138,7 @@ struct state {
     void                          *mode_states[MAX_NUM_MODES];
     int                            current_mode;
     enum click                     click;
+    bool                           peeking;
 };
 
 #endif

@@ -362,7 +362,8 @@ static struct section_def section_defs[] = {
         general,
         G_FIELD(home_row_keys, "", parse_home_row_keys, free_home_row_keys),
         G_FIELD(modes, "tile,bisect", parse_str, free_str),
-        G_FIELD(cancellation_status_code, "0", parse_uint8, noop)
+        G_FIELD(cancellation_status_code, "0", parse_uint8, noop),
+        G_FIELD(peek_alpha, "1", parse_double, noop)
     ),
     SECTION(
         mode_tile, MT_FIELD(label_color, "#fffd", parse_color, noop),

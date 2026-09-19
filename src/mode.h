@@ -11,6 +11,13 @@
 
 struct mode_interface {
     char *name;
+
+    // True when this mode's own key handler acts on space, which makes space
+    // unavailable as the peek key while the mode is up. Declared here rather
+    // than tested in main.c so that a mode which starts using space says so in
+    // the one place it is already saying what it does with keys.
+    bool takes_space;
+
     void *(*enter)(struct state *, struct rect area);
     void (*reenter)(struct state *, void *mode_state);
     bool (*key)(struct state *, void *mode_state, xkb_keysym_t, char *text);
@@ -31,6 +38,7 @@ bool has_last_mode_returned(struct state *);
 bool reenter_prev_mode(struct state *);
 void free_mode_states(struct state *);
 bool mode_handle_key(struct state *, xkb_keysym_t, char *text);
+bool mode_takes_space(struct state *);
 void mode_render(struct state *, cairo_t *);
 
 #endif

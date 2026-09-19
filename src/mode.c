@@ -127,6 +127,14 @@ bool mode_handle_key(struct state *state, xkb_keysym_t sym, char *text) {
         state, state->mode_states[state->current_mode], sym, text
     );
 }
+bool mode_takes_space(struct state *state) {
+    if (has_last_mode_returned(state)) {
+        return false;
+    }
+
+    return state->mode_interfaces[state->current_mode]->takes_space;
+}
+
 void mode_render(struct state *state, cairo_t *cairo) {
     if (has_last_mode_returned(state)) {
         return;

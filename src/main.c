@@ -741,6 +741,8 @@ static void print_usage() {
     puts(" -o, --option        set configuration option");
     puts(" -O, --output        specify display output to use");
     puts(" -p, --only-print    only print, don't move the cursor or click");
+    puts(" --drag=PATH         don't show an overlay: press, travel and");
+    puts("                     release along x1,y1,x2,y2,duration_ms");
 }
 
 static void print_version() {
@@ -794,6 +796,7 @@ int main(int argc, char **argv) {
         {"config", required_argument, 0, 'c'},
         {"output", required_argument, 0, 'O'},
         {"only-print", no_argument, 0, 'p'},
+        {"drag", required_argument, 0, 'D'},
         {NULL, 0, NULL, 0}
     };
 
@@ -805,8 +808,12 @@ int main(int argc, char **argv) {
     char  *config_filename      = NULL;
     char  *selected_output_name = NULL;
     bool   only_print           = false;
+    // A drag is not a selection: there is no overlay, no keyboard and no mode
+    // chain, only a path to walk. -1 means no --drag was given.
+    int drag_x1 = -1, drag_y1 = -1, drag_x2 = -1, drag_y2 = -1;
+    int drag_duration_ms = -1;
     while ((option_char = getopt_long(
-                argc, argv, "hvr:o:c:O:Rp", long_options, &option_index
+                argc, argv, "hvr:o:c:O:RpD:", long_options, &option_index
             )) != -1) {
         switch (option_char) {
         case 'h':
@@ -854,6 +861,22 @@ int main(int argc, char **argv) {
 
         case 'p':
             only_print = true;
+            break;
+
+        case 'D':
+            if (sscanf(
+                    optarg, "%d,%d,%d,%d,%d", &drag_x1, &drag_y1, &drag_x2,
+                    &drag_y2, &drag_duration_ms
+                ) != 5) {
+                LOG_ERR("Could not parse --drag argument.");
+                return 1;
+            }
+            if (drag_x1 < 0 || drag_y1 < 0 || drag_x2 < 0 || drag_y2 < 0 ||
+                drag_duration_ms < 0) {
+                LOG_ERR("--drag coordinates and duration must not be negative."
+                );
+                return 1;
+            }
             break;
 
         default:
@@ -966,6 +989,26 @@ int main(int argc, char **argv) {
 
         state.initial_area.x -= state.current_output->x;
         state.initial_area.y -= state.current_output->y;
+    }
+
+    // --drag stops here, before anything is drawn. It shares everything above
+    // -- the registry, the seat, the outputs, the transform -- and needs none
+    // of what follows: no surface, no keyboard grab, no mode chain. The caller
+    // has already decided both ends; this only walks between them.
+    if (drag_duration_ms >= 0) {
+        if (state.current_output == NULL) {
+            LOG_ERR("--drag needs --output: its coordinates are relative to "
+                    "one.");
+            return 1;
+        }
+
+        drag_pointer(
+            &state, drag_x1, drag_y1, drag_x2, drag_y2, drag_duration_ms,
+            state.config.mode_click.button
+        );
+
+        config_free_values(&state.config);
+        return 0;
     }
 
     surface_buffer_pool_init(&state.surface_buffer_pool);

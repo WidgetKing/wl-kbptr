@@ -12,7 +12,7 @@ void move_pointer(
 // Press `click` at (x1, y1), travel to (x2, y2) over `duration_ms`, release.
 // Coordinates are relative to state->current_output.
 void drag_pointer(
-    struct state *state, uint32_t x1, uint32_t y1, uint32_t x2, uint32_t y2,
+    struct state *state, int32_t x1, int32_t y1, int32_t x2, int32_t y2,
     uint32_t duration_ms, enum click click
 );
 

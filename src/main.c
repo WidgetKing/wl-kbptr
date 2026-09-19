@@ -742,7 +742,8 @@ static void print_usage() {
     puts(" -O, --output        specify display output to use");
     puts(" -p, --only-print    only print, don't move the cursor or click");
     puts(" --drag=PATH         don't show an overlay: press, travel and");
-    puts("                     release along x1,y1,x2,y2,duration_ms");
+    puts("                     release along x1,y1,x2,y2,duration_ms, in");
+    puts("                     layout coordinates");
 }
 
 static void print_version() {
@@ -871,10 +872,8 @@ int main(int argc, char **argv) {
                 LOG_ERR("Could not parse --drag argument.");
                 return 1;
             }
-            if (drag_x1 < 0 || drag_y1 < 0 || drag_x2 < 0 || drag_y2 < 0 ||
-                drag_duration_ms < 0) {
-                LOG_ERR("--drag coordinates and duration must not be negative."
-                );
+            if (drag_duration_ms < 0) {
+                LOG_ERR("--drag duration must not be negative.");
                 return 1;
             }
             break;
@@ -992,16 +991,14 @@ int main(int argc, char **argv) {
     }
 
     // --drag stops here, before anything is drawn. It shares everything above
-    // -- the registry, the seat, the outputs, the transform -- and needs none
-    // of what follows: no surface, no keyboard grab, no mode chain. The caller
-    // has already decided both ends; this only walks between them.
+    // -- the registry, the seat, the outputs -- and needs none of what
+    // follows: no surface, no keyboard grab, no mode chain. The caller has
+    // already decided both ends; this only walks between them.
+    //
+    // Its coordinates are layout coordinates -- the space the compositor lays
+    // its outputs out in, which is the only space a path over two of them can
+    // be said in -- so --output has nothing left to say about a drag.
     if (drag_duration_ms >= 0) {
-        if (state.current_output == NULL) {
-            LOG_ERR("--drag needs --output: its coordinates are relative to "
-                    "one.");
-            return 1;
-        }
-
         drag_pointer(
             &state, drag_x1, drag_y1, drag_x2, drag_y2, drag_duration_ms,
             state.config.mode_click.button

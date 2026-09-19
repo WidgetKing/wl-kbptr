@@ -5,6 +5,7 @@
 #include "state.h"
 #include "wlr-virtual-pointer-unstable-v1-client-protocol.h"
 
+#include <stdint.h>
 #include <time.h>
 #include <wayland-client.h>
 
@@ -129,6 +130,14 @@ void move_pointer(
 // same millisecond can be coalesced into a click that happened to move; a
 // motion and a release in the same millisecond can land the drop before the
 // client has processed where the pointer got to.
+//
+// Both ends are layout coordinates -- the ones the compositor lays its outputs
+// out in, which is also what a drag over two screens has to be said in. So the
+// virtual pointer is created WITHOUT an output: one bound to an output has its
+// absolute motion mapped into that output and can never leave it, however the
+// path is phrased. Unbound, the same motion is mapped over the whole layout,
+// which is the one device walking the whole path -- and one device is what
+// makes the crossing invisible to the client holding the drag.
 static void _sleep_ms(uint32_t ms) {
     if (ms == 0) {
         return;
@@ -141,8 +150,72 @@ static void _sleep_ms(uint32_t ms) {
     nanosleep(&ts, NULL);
 }
 
+// The box every output sits inside, which is the extent absolute motion is
+// mapped over. Computed from the outputs rather than assumed to start at 0,0:
+// a layout can have an output left of or above the origin.
+static void _layout_box(
+    struct state *state, int32_t *x, int32_t *y, uint32_t *width,
+    uint32_t *height
+) {
+    struct output *output;
+    int32_t        left = INT32_MAX, top = INT32_MAX;
+    int32_t        right = INT32_MIN, bottom = INT32_MIN;
+
+    wl_list_for_each (output, &state->outputs, link) {
+        if (output->x < left) {
+            left = output->x;
+        }
+        if (output->y < top) {
+            top = output->y;
+        }
+        if (output->x + output->width > right) {
+            right = output->x + output->width;
+        }
+        if (output->y + output->height > bottom) {
+            bottom = output->y + output->height;
+        }
+    }
+
+    *x      = left;
+    *y      = top;
+    *width  = right > left ? (uint32_t)(right - left) : 1;
+    *height = bottom > top ? (uint32_t)(bottom - top) : 1;
+}
+
+// One absolute motion at a layout point. The protocol takes unsigned
+// coordinates against an extent, so the layout's own origin is subtracted
+// here and the result clamped: a point outside the layout is a caller error,
+// and the nearest point inside it is a better answer than a wrap-around.
+static void _motion_layout(
+    struct state *state, struct zwlr_virtual_pointer_v1 *virt_pointer,
+    int32_t x, int32_t y, int32_t layout_x, int32_t layout_y,
+    uint32_t layout_width, uint32_t layout_height
+) {
+    int64_t rx = (int64_t)x - layout_x;
+    int64_t ry = (int64_t)y - layout_y;
+
+    if (rx < 0) {
+        rx = 0;
+    }
+    if (ry < 0) {
+        ry = 0;
+    }
+    if (rx > layout_width) {
+        rx = layout_width;
+    }
+    if (ry > layout_height) {
+        ry = layout_height;
+    }
+
+    zwlr_virtual_pointer_v1_motion_absolute(
+        virt_pointer, 0, (uint32_t)rx, (uint32_t)ry, layout_width, layout_height
+    );
+    zwlr_virtual_pointer_v1_frame(virt_pointer);
+    wl_display_roundtrip(state->wl_display);
+}
+
 void drag_pointer(
-    struct state *state, uint32_t x1, uint32_t y1, uint32_t x2, uint32_t y2,
+    struct state *state, int32_t x1, int32_t y1, int32_t x2, int32_t y2,
     uint32_t duration_ms, enum click click
 ) {
     if (!state->wl_virtual_pointer_mgr || click == CLICK_NONE) {
@@ -151,49 +224,37 @@ void drag_pointer(
 
     wl_display_roundtrip(state->wl_display);
 
+    int32_t  layout_x, layout_y;
+    uint32_t layout_width, layout_height;
+    _layout_box(state, &layout_x, &layout_y, &layout_width, &layout_height);
+
     struct zwlr_virtual_pointer_v1 *virt_pointer =
-        zwlr_virtual_pointer_manager_v1_create_virtual_pointer_with_output(
+        zwlr_virtual_pointer_manager_v1_create_virtual_pointer(
             state->wl_virtual_pointer_mgr,
-            ((struct seat *)state->seats.next)->wl_seat,
-            state->current_output->wl_output
+            ((struct seat *)state->seats.next)->wl_seat
         );
 
-    // Both ends are transformed up front, and the path is then interpolated in
-    // the transformed space. Every transform here is a rotation or a flip, so
-    // interpolating after transforming and transforming after interpolating
-    // give the same points -- and doing it once means the width and height
-    // _apply_transform swaps are read back only once, from the same call that
-    // produced the coordinates using them.
-    uint32_t output_width  = state->current_output->width;
-    uint32_t output_height = state->current_output->height;
-    uint32_t end_width     = state->current_output->width;
-    uint32_t end_height    = state->current_output->height;
-
-    _apply_transform(
-        &x1, &y1, &output_width, &output_height,
-        state->current_output->transform
-    );
-    _apply_transform(
-        &x2, &y2, &end_width, &end_height, state->current_output->transform
-    );
-
+    // No transform is applied to either end. An output's transform describes
+    // the step from its own surface coordinates to the screen; layout
+    // coordinates are already on the far side of it, which is why the caller
+    // can name a point on one output and a point on another in the same
+    // breath.
     uint32_t hold_ms = duration_ms / 4;
     if (hold_ms > 50) {
         hold_ms = 50;
     }
-    uint32_t travel_ms = duration_ms > 2 * hold_ms ? duration_ms - 2 * hold_ms
-                                                   : 0;
+    uint32_t travel_ms =
+        duration_ms > 2 * hold_ms ? duration_ms - 2 * hold_ms : 0;
 
     int steps = (int)(travel_ms / 8);
     if (steps < 1) {
         steps = 1;
     }
 
-    zwlr_virtual_pointer_v1_motion_absolute(
-        virt_pointer, 0, x1, y1, output_width, output_height
+    _motion_layout(
+        state, virt_pointer, x1, y1, layout_x, layout_y, layout_width,
+        layout_height
     );
-    zwlr_virtual_pointer_v1_frame(virt_pointer);
-    wl_display_roundtrip(state->wl_display);
 
     int btn = 271 + click;
 
@@ -209,14 +270,13 @@ void drag_pointer(
         // the last step lands exactly on (x2, y2) whatever the rounding did on
         // the way -- a drop one pixel short of where you aimed is a drop on
         // the wrong thing.
-        uint32_t x = (uint32_t)((int64_t)x1 + ((int64_t)x2 - x1) * i / steps);
-        uint32_t y = (uint32_t)((int64_t)y1 + ((int64_t)y2 - y1) * i / steps);
+        int32_t x = x1 + (int32_t)(((int64_t)x2 - x1) * i / steps);
+        int32_t y = y1 + (int32_t)(((int64_t)y2 - y1) * i / steps);
 
-        zwlr_virtual_pointer_v1_motion_absolute(
-            virt_pointer, 0, x, y, output_width, output_height
+        _motion_layout(
+            state, virt_pointer, x, y, layout_x, layout_y, layout_width,
+            layout_height
         );
-        zwlr_virtual_pointer_v1_frame(virt_pointer);
-        wl_display_roundtrip(state->wl_display);
 
         if (i < steps) {
             _sleep_ms(travel_ms / (uint32_t)steps);

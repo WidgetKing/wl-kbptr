@@ -139,6 +139,25 @@ struct state {
     int                            current_mode;
     enum click                     click;
     bool                           peeking;
+    // The double-click window. `double_click_sym` is the key that committed
+    // the selection, and its being anything but NoSymbol is what says the
+    // window is open: the selection is made, its click is out, and the overlay
+    // is staying up until `double_click_deadline_ms` to see whether that same
+    // key is pressed again.
+    xkb_keysym_t                   double_click_sym;
+    int64_t                        double_click_deadline_ms;
+    // Clicks the loop owes the pointer. A key handler cannot emit one itself:
+    // move_pointer round-trips the display, and a round trip from inside a
+    // dispatch is a dispatch inside a dispatch.
+    int                            pending_clicks;
+    // Whether any click has gone out already, so the end of main knows not to
+    // make a second one out of the same result.
+    bool                           clicked;
+    // --only-print. On state rather than a local in main() because the double-
+    // click window has to refuse to arm under it, and a virtual pointer that
+    // exists is not the same question: --only-print still binds the manager,
+    // it just never presses with it.
+    bool                           only_print;
 };
 
 #endif

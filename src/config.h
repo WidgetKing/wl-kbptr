@@ -83,6 +83,21 @@ struct mode_split_config {
 
 struct mode_click_config {
     enum click button;
+    // How long the overlay keeps listening after a selection has been made and
+    // clicked, in ms, for the key that committed it to be pressed again -- the
+    // second press clicks again, and the pair arrives as a double click. 0
+    // turns it off: the run ends at the first click, as it always did.
+    //
+    // This is a window on the *keyboard*, and it has to be shorter than the
+    // double-click time of whatever is being clicked, because the second click
+    // goes out when the key is pressed rather than when the window closes.
+    int      double_click_ms;
+    // The ring drawn around the selection for as long as that window is open.
+    // The overlay itself is gone by then -- it would hide the thing just
+    // clicked -- so the ring is the only sign that the keyboard is still being
+    // listened to.
+    uint32_t double_click_color;
+    double   double_click_radius;
 };
 
 struct config {

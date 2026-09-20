@@ -6,6 +6,7 @@
 #include "mode.h"
 #include "state.h"
 #include "surface_buffer.h"
+#include "utils_cairo.h"
 #include "utils_wayland.h"
 #include "viewporter-client-protocol.h"
 #include "wlr-layer-shell-unstable-v1-client-protocol.h"
@@ -22,12 +23,76 @@
 #include <poll.h>
 #include <sys/inotify.h>
 #include <sys/mman.h>
+#include <time.h>
 #include <unistd.h>
 #include <wayland-client-protocol.h>
 #include <wayland-client.h>
 #include <wayland-util.h>
 #include <xkbcommon/xkbcommon-keysyms.h>
 #include <xkbcommon/xkbcommon.h>
+
+static int64_t now_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+// What is on screen while the double-click window is open.
+//
+// The overlay is not: a selection has been made and clicked, and leaving the
+// labels up would hide the very thing just clicked -- which is also the thing
+// you are deciding whether to click again. So the surface is cleared to
+// nothing and a ring is drawn around the selection instead. It is the only
+// sign that the keyboard is still being listened to, and it sits where the eye
+// already is.
+//
+// Three rings of falling alpha, which is how bin/imthemousenow-halo draws the
+// pointer during a hold. A hold and a double-click window are the same kind of
+// moment -- the desktop looks normal while the keyboard does not mean what it
+// usually does -- so they are drawn the same way.
+static void render_double_click_ring(struct state *state, cairo_t *cairo) {
+    struct mode_click_config *config = &state->config.mode_click;
+
+    // Buffers are recycled, so the destination still holds the last frame
+    // drawn into it -- the whole overlay. Nothing here covers it, so it has to
+    // be cleared rather than drawn over.
+    cairo_save(cairo);
+    cairo_set_operator(cairo, CAIRO_OPERATOR_SOURCE);
+    cairo_set_source_rgba(cairo, 0, 0, 0, 0);
+    cairo_paint(cairo);
+    cairo_restore(cairo);
+
+    // cairo_paint() clears the pixels, not the path. The context comes back
+    // around with the buffer, and the frame before this one was the whole
+    // overlay -- whose labels were drawn with cairo_show_text(), which leaves
+    // a current point sitting wherever the last one ended. Left there, the
+    // first cairo_arc() below joins it to the ring with a straight line.
+    cairo_new_path(cairo);
+
+    double cx = state->result.x + state->result.w / 2.0;
+    double cy = state->result.y + state->result.h / 2.0;
+
+    for (int i = 0; i < 3; i++) {
+        double radius = config->double_click_radius * (1.0 - i * 0.22);
+        if (radius <= 0) {
+            break;
+        }
+
+        uint32_t color = config->double_click_color;
+        uint32_t alpha = (color & 0xff) / (i + 1);
+        cairo_set_source_u32(cairo, (color & 0xffffff00) | alpha);
+        cairo_set_line_width(cairo, 2);
+        // And the same hazard once per ring: an arc is appended to whatever
+        // path is already there, so it needs a sub-path of its own rather than
+        // a line drawn to it from the end of the last one. cairo_stroke()
+        // happens to clear the path each time round, which makes this look
+        // redundant -- it is not, it is what makes the arc independent of
+        // anything drawn before it.
+        cairo_new_sub_path(cairo);
+        cairo_arc(cairo, cx, cy, radius, 0, 2 * M_PI);
+        cairo_stroke(cairo);
+    }
+}
 
 static void send_frame(struct state *state) {
     int32_t scale_120 = state->fractional_scale;
@@ -51,7 +116,9 @@ static void send_frame(struct state *state) {
     cairo_t *cairo = surface_buffer->cairo;
     cairo_identity_matrix(cairo);
     cairo_scale(cairo, scale_120 / 120.0, scale_120 / 120.0);
-    if (state->peeking) {
+    if (state->double_click_sym != XKB_KEY_NoSymbol) {
+        render_double_click_ring(state, cairo);
+    } else if (state->peeking) {
         // Peek: draw the overlay into a group and composite the whole thing at
         // a low alpha, so what is underneath can be read through it. Done here
         // rather than by scaling every colour because it is the *overlay* that
@@ -158,6 +225,57 @@ static void peek_set(struct state *state, bool peeking) {
 
     state->peeking = peeking;
     request_frame(state);
+}
+
+// The mode chain has returned: the selection is made, and normally that is the
+// end of the run -- the loop stops, the surface comes down, and main puts the
+// pointer on the result and presses.
+//
+// With mode_click.double_click_ms set, the click is asked for here instead, at
+// once, and the overlay stays up for that long watching for `sym` -- the very
+// key that just committed -- to be pressed again. A second press clicks a
+// second time straight away, and the two presses reach the application close
+// enough together for it to read them as one double click.
+//
+// Emitting the first click now, rather than holding it back until the window
+// closes, is the whole point. The first click of a double click IS a single
+// click; a mouse does not know which one it is making either. Waiting to find
+// out would put the window's whole length in front of every single click in
+// the session to buy the occasional double one.
+//
+// The cost of it is paid by the other side: for as long as the window is open
+// the overlay still owns the keyboard, so a key typed immediately after a
+// click is eaten rather than reaching what was clicked. That is why any key
+// that is not `sym` closes the window at once instead of being swallowed for
+// the rest of it -- one lost keystroke rather than a window's worth.
+//
+// Nothing is armed when there is no click to double: move, both halves of a
+// drag, and hold all select with CLICK_NONE, and --only-print has no pointer
+// to press with.
+static void selection_committed(struct state *state, xkb_keysym_t sym) {
+    if (state->config.mode_click.double_click_ms <= 0 ||
+        state->click == CLICK_NONE || state->only_print) {
+        state->running = false;
+        return;
+    }
+
+    state->pending_clicks++;
+    state->double_click_sym = sym;
+    state->double_click_deadline_ms =
+        now_ms() + state->config.mode_click.double_click_ms;
+    request_frame(state);
+}
+
+// A key pressed while the double-click window is open. Everything that arrives
+// here arrives after the selection was made and clicked, so no mode is
+// listening any more and exactly one key still means anything: the one that
+// committed, pressed again. Anything else ends the run.
+static void double_click_key(struct state *state, xkb_keysym_t sym) {
+    if (sym == state->double_click_sym) {
+        state->pending_clicks++;
+    }
+
+    state->running = false;
 }
 
 bool compute_initial_area(struct state *state, struct rect *initial_area) {
@@ -362,6 +480,15 @@ static void key_channel_handle_line(struct state *state, char *line) {
     }
     xkb_keysym_to_utf8(key_sym, text, sizeof(text));
 
+    // Before the peek, because the key a grid commits on is space: once the
+    // window is open, a space is a second click rather than a look underneath.
+    if (state->double_click_sym != XKB_KEY_NoSymbol) {
+        if (pressed) {
+            double_click_key(state, key_sym);
+        }
+        return;
+    }
+
     if (key_sym == XKB_KEY_space && !mode_takes_space(state)) {
         peek_set(state, pressed);
         return;
@@ -373,7 +500,7 @@ static void key_channel_handle_line(struct state *state, char *line) {
 
     bool redraw = mode_handle_key(state, key_sym, text);
     if (has_last_mode_returned(state)) {
-        state->running = false;
+        selection_committed(state, key_sym);
     } else if (redraw) {
         request_frame(state);
     }
@@ -422,6 +549,15 @@ static void handle_keyboard_key(
         xkb_state_key_get_one_sym(seat->xkb_state, key_code);
     xkb_keysym_to_utf8(key_sym, text, sizeof(text));
 
+    // Before the peek, for the reason given on the channel's copy of this: a
+    // grid commits on space, so inside the window a space is a second click.
+    if (seat->state->double_click_sym != XKB_KEY_NoSymbol) {
+        if (key_state == WL_KEYBOARD_KEY_STATE_PRESSED) {
+            double_click_key(seat->state, key_sym);
+        }
+        return;
+    }
+
     if (key_sym == XKB_KEY_space && !mode_takes_space(seat->state)) {
         peek_set(
             seat->state, key_state == WL_KEYBOARD_KEY_STATE_PRESSED
@@ -432,7 +568,7 @@ static void handle_keyboard_key(
     if (key_state == WL_KEYBOARD_KEY_STATE_PRESSED) {
         bool redraw = mode_handle_key(seat->state, key_sym, text);
         if (has_last_mode_returned(seat->state)) {
-            seat->state->running = false;
+            selection_committed(seat->state, key_sym);
         } else if (redraw) {
             request_frame(seat->state);
         }
@@ -863,6 +999,9 @@ int main(int argc, char **argv) {
         .initial_area         = (struct rect){-1, -1, -1, -1},
         .home_row = (char *[]){"", "", "", "", "", "", "", "", "", "", ""},
         .click    = CLICK_NONE,
+        // Anything but NoSymbol means the double-click window is open, so this
+        // is what says it is not.
+        .double_click_sym = XKB_KEY_NoSymbol,
     };
 
     config_set_default(&state.config);
@@ -889,7 +1028,6 @@ int main(int argc, char **argv) {
     int    option_index         = 0;
     char  *config_filename      = NULL;
     char  *selected_output_name = NULL;
-    bool   only_print           = false;
     // A drag is not a selection: there is no overlay, no keyboard and no mode
     // chain, only a path to walk. -1 means no --drag was given.
     int drag_x1 = -1, drag_y1 = -1, drag_x2 = -1, drag_y2 = -1;
@@ -947,7 +1085,7 @@ int main(int argc, char **argv) {
             break;
 
         case 'p':
-            only_print = true;
+            state.only_print = true;
             break;
 
         case 'D':
@@ -1039,7 +1177,7 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    if (state.wl_virtual_pointer_mgr == NULL && !only_print) {
+    if (state.wl_virtual_pointer_mgr == NULL && !state.only_print) {
         LOG_ERR("Failed to get wlr_virtual_pointer_manager_v1 object.");
         return 1;
     }
@@ -1162,15 +1300,21 @@ int main(int argc, char **argv) {
 
     wl_surface_commit(state.wl_surface);
 
-    if (key_channel_path == NULL) {
-        while (state.running && wl_display_dispatch(state.wl_display)) {}
-    } else {
-        // Two sources now -- the display and the key channel -- so the loop
-        // has to wait on both. This is the standard Wayland prepare/read
-        // dance: without it, events queued between the poll and the read are
-        // events we sleep through.
+    // One loop, whether or not there is a key channel. It used to be two --
+    // a bare wl_display_dispatch when the keyboard was the only source, and
+    // this poll when the channel was a second one -- and the bare version
+    // cannot be given a deadline, which the double-click window needs. Rather
+    // than keep two loops and teach only one of them to wake up on time, the
+    // poll does both jobs: with no channel, key_channel_fd stays -1 and it
+    // simply waits on one fd.
+    //
+    // This is the standard Wayland prepare/read dance: without it, events
+    // queued between the poll and the read are events we sleep through.
+    if (key_channel_path != NULL) {
         key_channel_open(&state);
+    }
 
+    {
         struct pollfd fds[2] = {
             {.fd = wl_display_get_fd(state.wl_display), .events = POLLIN},
             {.fd = key_channel_fd, .events = POLLIN},
@@ -1187,7 +1331,16 @@ int main(int argc, char **argv) {
                 goto loop_done;
             }
 
-            if (poll(fds, key_channel_fd < 0 ? 1 : 2, -1) < 0) {
+            // Wait forever unless a double-click window is open, in which case
+            // only until it closes. Clamped at 0 rather than left negative: a
+            // deadline already past must not become "no timeout".
+            int timeout = -1;
+            if (state.double_click_sym != XKB_KEY_NoSymbol) {
+                int64_t left = state.double_click_deadline_ms - now_ms();
+                timeout      = left > 0 ? (int)left : 0;
+            }
+
+            if (poll(fds, key_channel_fd < 0 ? 1 : 2, timeout) < 0) {
                 wl_display_cancel_read(state.wl_display);
                 if (errno == EINTR) {
                     continue;
@@ -1208,6 +1361,26 @@ int main(int argc, char **argv) {
             }
             if (state.running && (fds[1].revents & POLLIN)) {
                 key_channel_drain(&state);
+            }
+
+            // Clicks are emitted here rather than by the key handler that
+            // decided on them. move_pointer round-trips the display, and a
+            // round trip from inside a dispatch is a dispatch inside a
+            // dispatch.
+            while (state.pending_clicks > 0) {
+                state.pending_clicks--;
+                move_pointer(
+                    &state, state.result.x + state.result.w / 2,
+                    state.result.y + state.result.h / 2, state.click
+                );
+                state.clicked = true;
+            }
+
+            // The window closed with nothing pressed in it: one click was all
+            // it was, and the run is over.
+            if (state.double_click_sym != XKB_KEY_NoSymbol &&
+                now_ms() >= state.double_click_deadline_ms) {
+                state.running = false;
             }
         }
     loop_done:;
@@ -1233,7 +1406,10 @@ int main(int argc, char **argv) {
     int status_code = 0;
     if (state.result.x != -1) {
         print_result(&state);
-        if (!only_print) {
+        // Not `if (!state.only_print)` alone any more: a double-click
+        // window clicks while the overlay is still up, and the same result
+        // must not be pressed a second time on the way out.
+        if (!state.only_print && !state.clicked) {
             move_pointer(
                 &state, state.result.x + state.result.w / 2,
                 state.result.y + state.result.h / 2, state.click

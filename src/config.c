@@ -87,6 +87,11 @@ static int parse_double(void *dest, char *value) {
     return 0;
 }
 
+static int parse_int(void *dest, char *value) {
+    *((int *)dest) = atoi(value);
+    return 0;
+}
+
 static int parse_uint8(void *dest, char *value) {
     int decoded = atoi(value);
     if (decoded < 0 || decoded >= 256) {
@@ -415,7 +420,12 @@ static struct section_def section_defs[] = {
         MS_FIELD(horizontal_color, "#008800cc", parse_color, noop),
         MS_FIELD(history_border_color, "#3339", parse_color, noop)
     ),
-    SECTION(mode_click, MC_FIELD(button, "left", parse_click, noop)),
+    SECTION(
+        mode_click, MC_FIELD(button, "left", parse_click, noop),
+        MC_FIELD(double_click_ms, "0", parse_int, noop),
+        MC_FIELD(double_click_color, "#89b4faee", parse_color, noop),
+        MC_FIELD(double_click_radius, "22", parse_double, noop)
+    ),
 };
 #pragma GCC diagnostic pop
 

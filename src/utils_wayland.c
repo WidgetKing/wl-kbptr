@@ -5,7 +5,9 @@
 #include "state.h"
 #include "wlr-virtual-pointer-unstable-v1-client-protocol.h"
 
+#include <signal.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <time.h>
 #include <wayland-client.h>
 
@@ -284,6 +286,118 @@ void drag_pointer(
     }
 
     _sleep_ms(hold_ms);
+    zwlr_virtual_pointer_v1_button(
+        virt_pointer, 0, btn, WL_POINTER_BUTTON_STATE_RELEASED
+    );
+    zwlr_virtual_pointer_v1_frame(virt_pointer);
+    wl_display_roundtrip(state->wl_display);
+
+    zwlr_virtual_pointer_v1_destroy(virt_pointer);
+}
+
+// A hold is the same press and the same held button as a drag, with the path
+// left open: press here, then go where you are told, then let go. It is what
+// steering the pointer by hand needs and a drag cannot give, because a drag
+// has to know both ends before it starts.
+//
+// The same rule still holds -- the button must not outlive this process --
+// and it is kept the same way: one function owns the press and the release,
+// and there is no way out of it that skips the second. The loop ends on EOF,
+// on the word `release`, or on a signal; all three fall through to the same
+// release below. A signal is why the handler only sets a flag: a release
+// emitted from inside a handler would race the one down here.
+static volatile sig_atomic_t _hold_stop = 0;
+
+static void _hold_signal(int signal) {
+    (void)signal;
+    _hold_stop = 1;
+}
+
+// Each move is walked rather than jumped, for the reason a drag's path is:
+// a client reading drag-and-drop wants a stream of motion under the button,
+// not one teleport per keystroke. Short, because a keypress must feel like it
+// landed -- long enough to be a movement, over before the key repeats.
+#define HOLD_MOVE_STEPS 4
+#define HOLD_MOVE_STEP_MS 4
+
+void hold_pointer(
+    struct state *state, int32_t x, int32_t y, enum click click, FILE *commands
+) {
+    if (!state->wl_virtual_pointer_mgr || click == CLICK_NONE) {
+        return;
+    }
+
+    wl_display_roundtrip(state->wl_display);
+
+    int32_t  layout_x, layout_y;
+    uint32_t layout_width, layout_height;
+    _layout_box(state, &layout_x, &layout_y, &layout_width, &layout_height);
+
+    struct zwlr_virtual_pointer_v1 *virt_pointer =
+        zwlr_virtual_pointer_manager_v1_create_virtual_pointer(
+            state->wl_virtual_pointer_mgr,
+            ((struct seat *)state->seats.next)->wl_seat
+        );
+
+    // Without SA_RESTART, so a signal arriving while we are blocked on the
+    // next command breaks the read rather than resuming it. That is what makes
+    // a TERM -- the panic key, a crashing run loop -- let go of the button
+    // instead of leaving the desktop with it down.
+    struct sigaction action = { .sa_handler = _hold_signal };
+    sigemptyset(&action.sa_mask);
+    sigaction(SIGTERM, &action, NULL);
+    sigaction(SIGINT, &action, NULL);
+    sigaction(SIGHUP, &action, NULL);
+
+    _motion_layout(
+        state, virt_pointer, x, y, layout_x, layout_y, layout_width,
+        layout_height
+    );
+
+    int btn = 271 + click;
+
+    zwlr_virtual_pointer_v1_button(
+        virt_pointer, 0, btn, WL_POINTER_BUTTON_STATE_PRESSED
+    );
+    zwlr_virtual_pointer_v1_frame(virt_pointer);
+    wl_display_roundtrip(state->wl_display);
+    _sleep_ms(50);
+
+    char line[256];
+    while (!_hold_stop && fgets(line, sizeof(line), commands) != NULL) {
+        int32_t next_x, next_y;
+        if (sscanf(line, "%d %d", &next_x, &next_y) != 2) {
+            // Anything that is not a point is the end of the hold. `release`
+            // is the word the caller sends; a line it garbled means the same,
+            // because a held button is not a thing to keep holding while
+            // guessing what was meant.
+            break;
+        }
+
+        for (int i = 1; i <= HOLD_MOVE_STEPS; i++) {
+            int32_t step_x =
+                x + (int32_t)(((int64_t)next_x - x) * i / HOLD_MOVE_STEPS);
+            int32_t step_y =
+                y + (int32_t)(((int64_t)next_y - y) * i / HOLD_MOVE_STEPS);
+
+            _motion_layout(
+                state, virt_pointer, step_x, step_y, layout_x, layout_y,
+                layout_width, layout_height
+            );
+
+            if (i < HOLD_MOVE_STEPS) {
+                _sleep_ms(HOLD_MOVE_STEP_MS);
+            }
+        }
+
+        x = next_x;
+        y = next_y;
+    }
+
+    // The same pause a drag leaves before letting go: a motion and a release
+    // in the same millisecond can land the drop before the client has
+    // processed where the pointer got to.
+    _sleep_ms(50);
     zwlr_virtual_pointer_v1_button(
         virt_pointer, 0, btn, WL_POINTER_BUTTON_STATE_RELEASED
     );

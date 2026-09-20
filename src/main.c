@@ -818,6 +818,9 @@ static void print_usage() {
     puts(" -o, --option        set configuration option");
     puts(" -O, --output        specify display output to use");
     puts(" -p, --only-print    only print, don't move the cursor or click");
+    puts(" --hold=X,Y          don't show an overlay: press at X,Y and hold");
+    puts("                     it, moving to each 'x y' line read on stdin,");
+    puts("                     releasing on EOF or 'release'");
     puts(" --drag=PATH         don't show an overlay: press, travel and");
     puts("                     release along x1,y1,x2,y2,duration_ms, in");
     puts("                     layout coordinates");
@@ -875,6 +878,7 @@ int main(int argc, char **argv) {
         {"output", required_argument, 0, 'O'},
         {"only-print", no_argument, 0, 'p'},
         {"drag", required_argument, 0, 'D'},
+        {"hold", required_argument, 0, 'L'},
         {NULL, 0, NULL, 0}
     };
 
@@ -890,8 +894,13 @@ int main(int argc, char **argv) {
     // chain, only a path to walk. -1 means no --drag was given.
     int drag_x1 = -1, drag_y1 = -1, drag_x2 = -1, drag_y2 = -1;
     int drag_duration_ms = -1;
+    // A hold is the same idea with the far end left open: it presses where it
+    // is told and then reads where to go. `held` is what says one was asked
+    // for, because 0,0 is a real point.
+    int  hold_x = 0, hold_y = 0;
+    bool held = false;
     while ((option_char = getopt_long(
-                argc, argv, "hvr:o:c:O:RpD:", long_options, &option_index
+                argc, argv, "hvr:o:c:O:RpD:L:", long_options, &option_index
             )) != -1) {
         switch (option_char) {
         case 'h':
@@ -953,6 +962,14 @@ int main(int argc, char **argv) {
                 LOG_ERR("--drag duration must not be negative.");
                 return 1;
             }
+            break;
+
+        case 'L':
+            if (sscanf(optarg, "%d,%d", &hold_x, &hold_y) != 2) {
+                LOG_ERR("Could not parse --hold argument.");
+                return 1;
+            }
+            held = true;
             break;
 
         default:
@@ -1075,6 +1092,18 @@ int main(int argc, char **argv) {
     // Its coordinates are layout coordinates -- the space the compositor lays
     // its outputs out in, which is the only space a path over two of them can
     // be said in -- so --output has nothing left to say about a drag.
+    // A hold stops in the same place and for the same reasons, and is steered
+    // from outside instead of planned in advance: stdin says where to go next
+    // for as long as the button is down.
+    if (held) {
+        hold_pointer(
+            &state, hold_x, hold_y, state.config.mode_click.button, stdin
+        );
+
+        config_free_values(&state.config);
+        return 0;
+    }
+
     if (drag_duration_ms >= 0) {
         drag_pointer(
             &state, drag_x1, drag_y1, drag_x2, drag_y2, drag_duration_ms,

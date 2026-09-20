@@ -5,6 +5,8 @@
 
 #include "state.h"
 
+#include <stdio.h>
+
 void move_pointer(
     struct state *state, uint32_t x, uint32_t y, enum click click
 );
@@ -14,6 +16,14 @@ void move_pointer(
 void drag_pointer(
     struct state *state, int32_t x1, int32_t y1, int32_t x2, int32_t y2,
     uint32_t duration_ms, enum click click
+);
+
+// Press `click` at (x, y) and keep it down, moving to each `x y` point read
+// from `commands`, until that stream ends or says anything else. Layout
+// coordinates, like drag_pointer's. The button is released before this
+// returns, however it returns.
+void hold_pointer(
+    struct state *state, int32_t x, int32_t y, enum click click, FILE *commands
 );
 
 #endif

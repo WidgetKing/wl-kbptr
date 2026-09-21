@@ -909,6 +909,14 @@ int main(int argc, char **argv) {
     wl_surface_commit(state.wl_surface);
     while (state.running && wl_display_dispatch(state.wl_display)) {}
 
+    // The frame callback holds a pointer to the surface and to the buffer
+    // pool, both destroyed just below. Left armed, it is still dispatched by
+    // the roundtrip that follows and calls `send_frame()` on freed memory.
+    if (state.wl_surface_callback != NULL) {
+        wl_callback_destroy(state.wl_surface_callback);
+        state.wl_surface_callback = NULL;
+    }
+
     wp_viewport_destroy(state.wp_viewport);
 
     zwlr_layer_surface_v1_destroy(state.wl_layer_surface);

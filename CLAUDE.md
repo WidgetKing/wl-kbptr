@@ -109,9 +109,9 @@ imthemousenow relies on. Read the upstream diff for:
   (moverest/wl-kbptr PR #96). If that lands, imthemousenow has to change as
   well as this fork, and the drag, hold and double-click commits will need
   rethinking, not just rebasing.
-- **Exit codes and stdout.** `--only-print`, `general.cancellation_status_code`,
-  and what a cancelled run returns are how the wrapper tells a finished
-  selection from a cancelled one.
+- **Exit codes.** imthemousenow sets `general.cancellation_status_code=1` and
+  reads the exit status to tell a finished selection from a cancelled one;
+  continuous lifetime depends on it.
 - **How keys and the surface are handled** in `main.c`: the key channel and
   the peek both sit in the keyboard and frame paths.
 

@@ -170,6 +170,11 @@ struct state {
     // makes, so a click can be a Ctrl click. 0 is a plain click, and is also
     // what keeps a run that was not asked for any from touching the keyboard.
     uint32_t                       modifiers;
+    // --modifiers-file: read at each press and, when it can be read, used in
+    // place of `modifiers`, so the wrapper can change what a click holds
+    // without relaunching the overlay (which is a visible flicker). Missing
+    // or empty means none; unparseable keeps `modifiers`.
+    const char                    *modifiers_file;
 };
 
 #endif

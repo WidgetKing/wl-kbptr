@@ -26,4 +26,8 @@ void hold_pointer(
     struct state *state, int32_t x, int32_t y, enum click click, FILE *commands
 );
 
+// A --modifiers list, commas or whitespace between names, into MODIFIER_*
+// bits. Non-zero for a name it does not know. Defined in main.c.
+int parse_modifiers(const char *list, uint32_t *modifiers);
+
 #endif

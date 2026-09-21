@@ -94,6 +94,7 @@ PROBES=(
   --hold               # hold ACTION, 0006
   double_click_ms      # double click by pressing again, 0007
   --modifiers          # a click with Ctrl, Alt, Shift or Super held
+  --modifiers-file     # ...toggled while the overlay is up, no relaunch
 )
 for probe in "${PROBES[@]}"; do
   if grep -qa -- "$probe" "$BIN"; then ok "probe finds '$probe'"; else
@@ -156,6 +157,8 @@ accepts "--modifiers empty" -O DP-9 --modifiers ''
 accepts "--modifiers on a drag" -O DP-9 --modifiers ctrl --drag 100,200,900,700,250
 accepts "--modifiers on a hold" -O DP-9 --modifiers shift,super --hold 640,360
 rejects "--modifiers with a name it does not know" -O DP-9 --modifiers ctrl,hyper
+accepts "--modifiers with spaces, as the session writes them" -O DP-9 --modifiers 'ctrl alt'
+accepts "--modifiers-file, even one that is not there yet" -O DP-9 --modifiers-file /nonexistent/modifiers
 
 # --- 5. against a real imthemousenow ---------------------------------------------
 # The same questions, asked by the wrapper itself: its probes see this build

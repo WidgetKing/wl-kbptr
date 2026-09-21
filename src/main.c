@@ -950,12 +950,13 @@ static void print_result(struct state *state) {
     );
 }
 
-// --modifiers: a comma-separated list of ctrl, alt, shift and super, in any
-// order. Empty is allowed and means none, so a caller can always pass the flag
-// rather than decide whether to. A name it does not know is an error rather
-// than skipped: a click made without the Ctrl that was asked for is a
-// different click, not a slightly worse one.
-static int parse_modifiers(const char *list, uint32_t *modifiers) {
+// --modifiers: a list of ctrl, alt, shift and super, in any order, separated
+// by commas or whitespace (so --modifiers-file can hold what the wrapper's
+// session writes, "ctrl alt\n"). Empty is allowed and means none, so a caller
+// can always pass the flag rather than decide whether to. A name it does not
+// know is an error rather than skipped: a click made without the Ctrl that was
+// asked for is a different click, not a slightly worse one.
+int parse_modifiers(const char *list, uint32_t *modifiers) {
     static const struct {
         const char *name;
         uint32_t    bit;
@@ -965,13 +966,13 @@ static int parse_modifiers(const char *list, uint32_t *modifiers) {
         {"shift", MODIFIER_SHIFT},
         {"super", MODIFIER_SUPER},
     };
+    static const char *separators = ", \t\r\n";
 
     *modifiers = 0;
     const char *start = list;
-    while (*start != 0) {
-        const char *end = strchr(start, ',');
-        size_t      len = end == NULL ? strlen(start) : (size_t)(end - start);
-        bool        known = false;
+    while (*(start += strspn(start, separators)) != 0) {
+        size_t len   = strcspn(start, separators);
+        bool   known = false;
 
         for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
             if (strlen(names[i].name) == len &&
@@ -983,11 +984,7 @@ static int parse_modifiers(const char *list, uint32_t *modifiers) {
         if (!known) {
             return 1;
         }
-
-        if (end == NULL) {
-            break;
-        }
-        start = end + 1;
+        start += len;
     }
 
     return 0;
@@ -1012,6 +1009,8 @@ static void print_usage() {
     puts("                     layout coordinates");
     puts(" --modifiers=LIST    hold ctrl,alt,shift,super down around every");
     puts("                     press: a click, a drag, a hold");
+    puts(" --modifiers-file=F  read that list from F at each press instead,");
+    puts("                     so it can change while the overlay is up");
 }
 
 static void print_version() {
@@ -1071,6 +1070,7 @@ int main(int argc, char **argv) {
         {"drag", required_argument, 0, 'D'},
         {"hold", required_argument, 0, 'L'},
         {"modifiers", required_argument, 0, 'M'},
+        {"modifiers-file", required_argument, 0, 'F'},
         {NULL, 0, NULL, 0}
     };
 
@@ -1168,6 +1168,10 @@ int main(int argc, char **argv) {
                 LOG_ERR("Could not parse --modifiers argument.");
                 return 1;
             }
+            break;
+
+        case 'F':
+            state.modifiers_file = optarg;
             break;
 
         default:

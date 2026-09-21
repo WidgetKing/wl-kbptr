@@ -116,8 +116,35 @@ static uint32_t _modifier_mask(struct xkb_keymap *keymap, uint32_t modifiers) {
     return mask;
 }
 
+// --modifiers-file, read now rather than at launch, so what was toggled while
+// the overlay was up is what this press holds. The file is written by someone
+// else at any moment: a missing one is none, a garbled one is logged and the
+// launch-time list kept.
+static void _modifiers_from_file(struct state *state) {
+    if (state->modifiers_file == NULL) {
+        return;
+    }
+    char  buf[128] = {0};
+    FILE *file     = fopen(state->modifiers_file, "r");
+    if (file != NULL) {
+        size_t n = fread(buf, 1, sizeof(buf) - 1, file);
+        buf[n]   = 0;
+        fclose(file);
+    }
+    uint32_t modifiers;
+    if (parse_modifiers(buf, &modifiers) != 0) {
+        LOG_ERR("Could not parse %s: keeping --modifiers.", state->modifiers_file);
+        return;
+    }
+    state->modifiers = modifiers;
+}
+
 static void modifiers_down(struct state *state) {
-    if (state->modifiers == 0 || _modifier_keyboard != NULL) {
+    if (_modifier_keyboard != NULL) {
+        return;
+    }
+    _modifiers_from_file(state);
+    if (state->modifiers == 0) {
         return;
     }
     if (state->wl_virtual_keyboard_mgr == NULL) {

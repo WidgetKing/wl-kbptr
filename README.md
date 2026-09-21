@@ -1,3 +1,13 @@
+> **This is not the wl-kbptr project.** It is a fork of
+> [moverest/wl-kbptr](https://github.com/moverest/wl-kbptr), carrying the patches
+> [imthemousenow](https://github.com/WidgetKing/imthemousenow) needs. The program
+> is moverest's, and everything below this note is his README, unchanged.
+>
+> The `imthemousenow` branch is upstream at a pinned commit (tag `pin/*`) with
+> imthemousenow's commits on top; each one says what it adds and why. None of
+> it is intended for upstream. For wl-kbptr itself -- issues, releases, the
+> real thing -- go to [moverest/wl-kbptr](https://github.com/moverest/wl-kbptr).
+
 # wl-kbptr
 
 `wl-kbptr` &mdash; short for Wayland Keyboard Pointer &mdash; is a utility to help move the mouse pointer with the keyboard.

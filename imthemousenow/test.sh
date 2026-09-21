@@ -93,6 +93,7 @@ PROBES=(
   peek_alpha           # peek on SPACE, 0005
   --hold               # hold ACTION, 0006
   double_click_ms      # double click by pressing again, 0007
+  --modifiers          # a click with Ctrl, Alt, Shift or Super held
 )
 for probe in "${PROBES[@]}"; do
   if grep -qa -- "$probe" "$BIN"; then ok "probe finds '$probe'"; else
@@ -148,6 +149,13 @@ rejects "--drag missing its duration" -O DP-9 --drag 100,200,900,700
 rejects "--drag with a negative duration" -O DP-9 --drag 100,200,900,700,-1
 accepts "--hold x,y" -O DP-9 --hold 640,360
 rejects "--hold with one coordinate" -O DP-9 --hold 640
+# --modifiers, on every kind of press, and empty because the wrapper may pass
+# an empty list rather than leave the flag out.
+accepts "--modifiers on a click" -O DP-9 --modifiers ctrl,alt,shift,super -o modes=tile,click
+accepts "--modifiers empty" -O DP-9 --modifiers ''
+accepts "--modifiers on a drag" -O DP-9 --modifiers ctrl --drag 100,200,900,700,250
+accepts "--modifiers on a hold" -O DP-9 --modifiers shift,super --hold 640,360
+rejects "--modifiers with a name it does not know" -O DP-9 --modifiers ctrl,hyper
 
 # --- 5. against a real imthemousenow ---------------------------------------------
 # The same questions, asked by the wrapper itself: its probes see this build

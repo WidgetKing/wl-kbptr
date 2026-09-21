@@ -9,6 +9,7 @@
 #include "utils_cairo.h"
 #include "utils_wayland.h"
 #include "viewporter-client-protocol.h"
+#include "virtual-keyboard-unstable-v1-client-protocol.h"
 #include "wlr-layer-shell-unstable-v1-client-protocol.h"
 #include "wlr-screencopy-unstable-v1-client-protocol.h"
 #include "wlr-virtual-pointer-unstable-v1-client-protocol.h"
@@ -825,6 +826,12 @@ static void handle_registry_global(
         state->wl_virtual_pointer_mgr = wl_registry_bind(
             registry, name, &zwlr_virtual_pointer_manager_v1_interface, 2
         );
+    } else if (strcmp(
+                   interface, zwp_virtual_keyboard_manager_v1_interface.name
+               ) == 0) {
+        state->wl_virtual_keyboard_mgr = wl_registry_bind(
+            registry, name, &zwp_virtual_keyboard_manager_v1_interface, 1
+        );
     } else if (strcmp(interface, wp_viewporter_interface.name) == 0) {
         state->wp_viewporter =
             wl_registry_bind(registry, name, &wp_viewporter_interface, 1);
@@ -943,6 +950,49 @@ static void print_result(struct state *state) {
     );
 }
 
+// --modifiers: a comma-separated list of ctrl, alt, shift and super, in any
+// order. Empty is allowed and means none, so a caller can always pass the flag
+// rather than decide whether to. A name it does not know is an error rather
+// than skipped: a click made without the Ctrl that was asked for is a
+// different click, not a slightly worse one.
+static int parse_modifiers(const char *list, uint32_t *modifiers) {
+    static const struct {
+        const char *name;
+        uint32_t    bit;
+    } names[] = {
+        {"ctrl", MODIFIER_CTRL},
+        {"alt", MODIFIER_ALT},
+        {"shift", MODIFIER_SHIFT},
+        {"super", MODIFIER_SUPER},
+    };
+
+    *modifiers = 0;
+    const char *start = list;
+    while (*start != 0) {
+        const char *end = strchr(start, ',');
+        size_t      len = end == NULL ? strlen(start) : (size_t)(end - start);
+        bool        known = false;
+
+        for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+            if (strlen(names[i].name) == len &&
+                strncmp(names[i].name, start, len) == 0) {
+                *modifiers |= names[i].bit;
+                known       = true;
+            }
+        }
+        if (!known) {
+            return 1;
+        }
+
+        if (end == NULL) {
+            break;
+        }
+        start = end + 1;
+    }
+
+    return 0;
+}
+
 static void print_usage() {
     puts("wl-kbptr [OPTION...]\n");
 
@@ -960,6 +1010,8 @@ static void print_usage() {
     puts(" --drag=PATH         don't show an overlay: press, travel and");
     puts("                     release along x1,y1,x2,y2,duration_ms, in");
     puts("                     layout coordinates");
+    puts(" --modifiers=LIST    hold ctrl,alt,shift,super down around every");
+    puts("                     press: a click, a drag, a hold");
 }
 
 static void print_version() {
@@ -1018,6 +1070,7 @@ int main(int argc, char **argv) {
         {"only-print", no_argument, 0, 'p'},
         {"drag", required_argument, 0, 'D'},
         {"hold", required_argument, 0, 'L'},
+        {"modifiers", required_argument, 0, 'M'},
         {NULL, 0, NULL, 0}
     };
 
@@ -1038,7 +1091,7 @@ int main(int argc, char **argv) {
     int  hold_x = 0, hold_y = 0;
     bool held = false;
     while ((option_char = getopt_long(
-                argc, argv, "hvr:o:c:O:RpD:L:", long_options, &option_index
+                argc, argv, "hvr:o:c:O:RpD:L:M:", long_options, &option_index
             )) != -1) {
         switch (option_char) {
         case 'h':
@@ -1108,6 +1161,13 @@ int main(int argc, char **argv) {
                 return 1;
             }
             held = true;
+            break;
+
+        case 'M':
+            if (parse_modifiers(optarg, &state.modifiers) != 0) {
+                LOG_ERR("Could not parse --modifiers argument.");
+                return 1;
+            }
             break;
 
         default:
@@ -1419,6 +1479,9 @@ int main(int argc, char **argv) {
         status_code = state.config.general.cancellation_status_code;
     }
 
+    if (state.wl_virtual_keyboard_mgr != NULL) {
+        zwp_virtual_keyboard_manager_v1_destroy(state.wl_virtual_keyboard_mgr);
+    }
     if (state.wl_virtual_pointer_mgr != NULL) {
         zwlr_virtual_pointer_manager_v1_destroy(state.wl_virtual_pointer_mgr);
     }

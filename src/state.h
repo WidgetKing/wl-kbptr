@@ -93,6 +93,13 @@ struct output {
     enum wl_output_transform transform;
 };
 
+enum modifier {
+    MODIFIER_CTRL  = 1 << 0,
+    MODIFIER_ALT   = 1 << 1,
+    MODIFIER_SHIFT = 1 << 2,
+    MODIFIER_SUPER = 1 << 3,
+};
+
 struct seat {
     struct wl_list      link; // type: struct seat
     struct wl_seat     *wl_seat;
@@ -111,6 +118,7 @@ struct state {
     struct wl_shm                          *wl_shm;
     struct zwlr_layer_shell_v1             *wl_layer_shell;
     struct zwlr_virtual_pointer_manager_v1 *wl_virtual_pointer_mgr;
+    struct zwp_virtual_keyboard_manager_v1 *wl_virtual_keyboard_mgr;
     struct wp_viewporter                   *wp_viewporter;
     struct wp_viewport                     *wp_viewport;
     struct wp_fractional_scale_manager_v1  *fractional_scale_mgr;
@@ -158,6 +166,10 @@ struct state {
     // exists is not the same question: --only-print still binds the manager,
     // it just never presses with it.
     bool                           only_print;
+    // --modifiers: MODIFIER_* bits held down around every press this run
+    // makes, so a click can be a Ctrl click. 0 is a plain click, and is also
+    // what keeps a run that was not asked for any from touching the keyboard.
+    uint32_t                       modifiers;
 };
 
 #endif

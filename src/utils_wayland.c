@@ -3,11 +3,18 @@
 #include "utils_wayland.h"
 
 #include "state.h"
+#include "log.h"
+#include "virtual-keyboard-unstable-v1-client-protocol.h"
 #include "wlr-virtual-pointer-unstable-v1-client-protocol.h"
 
 #include <signal.h>
+#include <string.h>
+#include <sys/mman.h>
+#include <unistd.h>
+#include <xkbcommon/xkbcommon.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <time.h>
 #include <wayland-client.h>
 
@@ -67,6 +74,126 @@ static void _apply_transform(
     }
 }
 
+// --modifiers, held down around a press. Applications decide what a Ctrl
+// click means from the modifier state their wl_keyboard reports, so this is a
+// keyboard: a virtual one on the same seat, which says "these are down" and
+// nothing else. No key is ever pressed on it. Only the modifier state moves,
+// so no compositor binding can fire and no application sees a keystroke.
+//
+// It has to be given a keymap before it may say anything, and the keymap is
+// the risk. A virtual keyboard with a keymap of its own becomes the seat's
+// keymap while it is the active keyboard, and a foreign one there is what
+// breaks this program's next start (wtype does exactly that). So it is given
+// the seat's own keymap back, the one this process was sent, and the seat is
+// left with the keymap it already had.
+//
+// One keyboard per press, created here and destroyed by modifiers_up, so
+// nothing about the keyboard outlives the press it was made for.
+static struct zwp_virtual_keyboard_v1 *_modifier_keyboard = NULL;
+static uint32_t                        _modifier_locked, _modifier_group;
+
+static uint32_t _modifier_mask(struct xkb_keymap *keymap, uint32_t modifiers) {
+    static const struct {
+        uint32_t    bit;
+        const char *name;
+    } names[] = {
+        {MODIFIER_CTRL, XKB_MOD_NAME_CTRL},
+        {MODIFIER_ALT, XKB_MOD_NAME_ALT},
+        {MODIFIER_SHIFT, XKB_MOD_NAME_SHIFT},
+        {MODIFIER_SUPER, XKB_MOD_NAME_LOGO},
+    };
+
+    uint32_t mask = 0;
+    for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
+        if (!(modifiers & names[i].bit)) {
+            continue;
+        }
+        xkb_mod_index_t index = xkb_keymap_mod_get_index(keymap, names[i].name);
+        if (index != XKB_MOD_INVALID) {
+            mask |= 1u << index;
+        }
+    }
+    return mask;
+}
+
+static void modifiers_down(struct state *state) {
+    if (state->modifiers == 0 || _modifier_keyboard != NULL) {
+        return;
+    }
+    if (state->wl_virtual_keyboard_mgr == NULL) {
+        LOG_ERR("No virtual keyboard: pressing without the modifiers.");
+        return;
+    }
+
+    struct seat *seat = (struct seat *)state->seats.next;
+    if (seat->xkb_keymap == NULL) {
+        LOG_ERR("No keymap from the seat: pressing without the modifiers.");
+        return;
+    }
+
+    char *keymap =
+        xkb_keymap_get_as_string(seat->xkb_keymap, XKB_KEYMAP_FORMAT_TEXT_V1);
+    if (keymap == NULL) {
+        LOG_ERR("Could not serialise the keymap: pressing without modifiers.");
+        return;
+    }
+    // The terminating NUL is part of what is sent: wl_keyboard.keymap sizes
+    // include it, which is why the keymap handler above maps size - 1.
+    size_t size = strlen(keymap) + 1;
+    int    fd   = memfd_create("wl-kbptr-keymap", MFD_CLOEXEC);
+    if (fd < 0 || write(fd, keymap, size) != (ssize_t)size) {
+        LOG_ERR("Could not share the keymap: pressing without the modifiers.");
+        if (fd >= 0) {
+            close(fd);
+        }
+        free(keymap);
+        return;
+    }
+    free(keymap);
+
+    // Locks and layout are carried over, not zeroed: this keyboard is about
+    // to be the one whose state the focused window sees, and a Ctrl click
+    // should not also be a click with Caps Lock switched off.
+    _modifier_locked = 0;
+    _modifier_group  = 0;
+    if (seat->xkb_state != NULL) {
+        _modifier_locked =
+            xkb_state_serialize_mods(seat->xkb_state, XKB_STATE_MODS_LOCKED);
+        _modifier_group = xkb_state_serialize_layout(
+            seat->xkb_state, XKB_STATE_LAYOUT_EFFECTIVE
+        );
+    }
+
+    _modifier_keyboard = zwp_virtual_keyboard_manager_v1_create_virtual_keyboard(
+        state->wl_virtual_keyboard_mgr, seat->wl_seat
+    );
+    zwp_virtual_keyboard_v1_keymap(
+        _modifier_keyboard, WL_KEYBOARD_KEYMAP_FORMAT_XKB_V1, fd, size
+    );
+    close(fd);
+    zwp_virtual_keyboard_v1_modifiers(
+        _modifier_keyboard, _modifier_mask(seat->xkb_keymap, state->modifiers),
+        0, _modifier_locked, _modifier_group
+    );
+    wl_display_roundtrip(state->wl_display);
+}
+
+// Let go of what modifiers_down held. Safe to call when nothing is held, so
+// every press can be followed by it without asking.
+static void modifiers_up(struct state *state) {
+    if (_modifier_keyboard == NULL) {
+        return;
+    }
+
+    zwp_virtual_keyboard_v1_modifiers(
+        _modifier_keyboard, 0, 0, _modifier_locked, _modifier_group
+    );
+    wl_display_roundtrip(state->wl_display);
+    zwp_virtual_keyboard_v1_destroy(_modifier_keyboard);
+    _modifier_keyboard = NULL;
+    wl_display_roundtrip(state->wl_display);
+}
+
 void move_pointer(
     struct state *state, uint32_t x, uint32_t y, enum click click
 ) {
@@ -100,6 +227,7 @@ void move_pointer(
     if (state->click != CLICK_NONE) {
         int btn = 271 + click;
 
+        modifiers_down(state);
         zwlr_virtual_pointer_v1_button(
             virt_pointer, 0, btn, WL_POINTER_BUTTON_STATE_PRESSED
         );
@@ -111,6 +239,7 @@ void move_pointer(
         );
         zwlr_virtual_pointer_v1_frame(virt_pointer);
         wl_display_roundtrip(state->wl_display);
+        modifiers_up(state);
     }
 
     zwlr_virtual_pointer_v1_destroy(virt_pointer);
@@ -260,6 +389,7 @@ void drag_pointer(
 
     int btn = 271 + click;
 
+    modifiers_down(state);
     zwlr_virtual_pointer_v1_button(
         virt_pointer, 0, btn, WL_POINTER_BUTTON_STATE_PRESSED
     );
@@ -291,6 +421,7 @@ void drag_pointer(
     );
     zwlr_virtual_pointer_v1_frame(virt_pointer);
     wl_display_roundtrip(state->wl_display);
+    modifiers_up(state);
 
     zwlr_virtual_pointer_v1_destroy(virt_pointer);
 }
@@ -356,6 +487,7 @@ void hold_pointer(
 
     int btn = 271 + click;
 
+    modifiers_down(state);
     zwlr_virtual_pointer_v1_button(
         virt_pointer, 0, btn, WL_POINTER_BUTTON_STATE_PRESSED
     );
@@ -403,6 +535,7 @@ void hold_pointer(
     );
     zwlr_virtual_pointer_v1_frame(virt_pointer);
     wl_display_roundtrip(state->wl_display);
+    modifiers_up(state);
 
     zwlr_virtual_pointer_v1_destroy(virt_pointer);
 }

@@ -18,6 +18,5 @@ command it prints back to this build. That is the real interface: the
 wrapper's capability probes ask this binary, and the options they switch on
 have to parse here.
 
-Nothing under this directory, and nothing in the README note at the top of
-the repository, is exported into imthemousenow's `pkg/*.patch`;
-`pkg/sync-patches` there skips any commit that only touches these.
+imthemousenow's install builds the tip of this branch, so a push here is
+what the next install or update anywhere builds. Run this first.

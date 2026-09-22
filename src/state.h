@@ -153,6 +153,9 @@ struct state {
     // The transition picked for this overlay, and the seed it plays with.
     const struct transition       *intro;
     uint32_t                       intro_seed;
+    // How long this overlay's intro lasts: intro_ms, or longer to cover a
+    // double-click window handed over from the overlay before.
+    int                            intro_ms;
     // The double-click window. `double_click_sym` is the key that committed
     // the selection, and its being anything but NoSymbol is what says the
     // window is open: the selection is made, its click is out, and the overlay
@@ -185,6 +188,26 @@ struct state {
     // SIGUSR1 arrives, so the wrapper can switch left and right click, tint
     // and all, without relaunching. NULL leaves SIGUSR1 alone.
     const char                    *overrides_file;
+    // --double-click-handoff: a continuous run's way of keeping the double
+    // click without keeping an overlay up to wait for it. See
+    // handoff_write() and handoff_read() in main.c.
+    const char                    *handoff_file;
+    // A double click left open by the overlay before this one: pressing
+    // `handoff_sym` before `handoff_deadline_ms` clicks again at
+    // `handoff_x`,`handoff_y` on `handoff_output`. NoSymbol when there is none.
+    xkb_keysym_t                   handoff_sym;
+    int64_t                        handoff_deadline_ms;
+    char                           handoff_output[64];
+    int                            handoff_x;
+    int                            handoff_y;
+    int                            handoff_clicks;
+    // This overlay handed its window on and keeps it itself, from a child,
+    // after exiting (see handoff_watch): the key that committed, to listen for.
+    bool                           handoff_detach;
+    xkb_keysym_t                   handoff_commit_sym;
+    // The window taken over is kept by the overlay before; this one only
+    // swallows its key.
+    bool                           handoff_swallow_only;
 };
 
 #endif

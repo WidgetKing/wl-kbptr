@@ -100,6 +100,7 @@ PROBES=(
   --scroll             # scroll mode, SUPER + ' and / in the overlay
   intro_ms             # the overlay arriving through a transition
   intro_chunk          # ...and how big its pieces are
+  --double-click-handoff # double click in a continuous lifetime
 )
 for probe in "${PROBES[@]}"; do
   if grep -qa -- "$probe" "$BIN"; then ok "probe finds '$probe'"; else
@@ -167,6 +168,15 @@ accepts "--modifiers on a hold" -O DP-9 --modifiers shift,super --hold 640,360
 rejects "--modifiers with a name it does not know" -O DP-9 --modifiers ctrl,hyper
 accepts "--modifiers with spaces, as the session writes them" -O DP-9 --modifiers 'ctrl alt'
 accepts "--modifiers-file, even one that is not there yet" -O DP-9 --modifiers-file /nonexistent/modifiers
+accepts "--double-click-handoff, even one that is not there yet" -O DP-9 --double-click-handoff /nonexistent/h -o modes=tile,click
+# One double click per click: the next overlay takes the file, so a third
+# overlay inside the same window cannot click the spot a third time.
+printf 'space DP-9 10 10 99999999999999 next\n' >"$WORK/handoff"
+"$BIN" -O DP-9 --double-click-handoff "$WORK/handoff" -o modes=tile,click </dev/null >/dev/null 2>&1
+[[ -e $WORK/handoff ]] && no "a handed-off double click is taken, not just read" ||
+  ok "a handed-off double click is taken, not just read"
+printf 'not a handoff at all\n' >"$WORK/handoff"
+accepts "a handoff file that makes no sense is ignored" -O DP-9 --double-click-handoff "$WORK/handoff" -o modes=tile,click
 accepts "--overrides-file, even one that is not there yet" -O DP-9 --overrides-file /nonexistent/o -o modes=tile,click
 
 # --- 5. against a real imthemousenow ---------------------------------------------

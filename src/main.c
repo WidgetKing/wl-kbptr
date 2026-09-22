@@ -130,12 +130,22 @@ static void send_frame(struct state *state) {
     const struct general_config *general = &state->config.general;
     if (general->intro.count > 0 && general->intro_ms > 0) {
         if (state->intro_start_ms == 0) {
+            // A window handed over from the overlay before lasts as long as
+            // the intro does, or the intro as long as it: the screen coming
+            // back is what says a second press still counts.
+            if (state->handoff_sym != XKB_KEY_NoSymbol) {
+                int64_t left = state->handoff_deadline_ms - now_ms();
+                state->intro_ms = left > general->intro_ms ? (int)left
+                                                           : general->intro_ms;
+            } else {
+                state->intro_ms = general->intro_ms;
+            }
             state->intro_start_ms = now_ms() - 16;
             state->intro_seed     = (uint32_t)now_ms();
             state->intro =
                 general->intro.items[state->intro_seed % general->intro.count];
         }
-        intro_t = (double)(now_ms() - state->intro_start_ms) / general->intro_ms;
+        intro_t = (double)(now_ms() - state->intro_start_ms) / state->intro_ms;
     }
     bool arriving = intro_t < 1;
 
@@ -273,9 +283,20 @@ static void peek_set(struct state *state, bool peeking) {
 // Nothing is armed when there is no click to double: move, both halves of a
 // drag, and hold all select with CLICK_NONE, and --only-print has no pointer
 // to press with.
+static void handoff_write(struct state *state, xkb_keysym_t sym);
+
 static void selection_committed(struct state *state, xkb_keysym_t sym) {
     if (state->config.mode_click.double_click_ms <= 0 ||
         state->click == CLICK_NONE || state->only_print) {
+        state->running = false;
+        return;
+    }
+
+    // In a continuous run the window is the next overlay's to keep, not this
+    // one's: say what would double this click, and go, so the next overlay
+    // is not held back behind a window of nothing.
+    if (state->handoff_file != NULL) {
+        handoff_write(state, sym);
         state->running = false;
         return;
     }
@@ -297,6 +318,117 @@ static void double_click_key(struct state *state, xkb_keysym_t sym) {
     }
 
     state->running = false;
+}
+
+// The double-click window, carried across a relaunch.
+//
+// A continuous run puts the overlay straight back up after every click, and
+// an overlay that held a window open first would put the whole window in
+// front of every next overlay. So with --double-click-handoff=F the overlay
+// that clicks does not wait: it writes to F what would make it a double click
+// and exits at once --
+//
+//     <keysym name> <output name> <x> <y> <deadline ms>
+//
+// -- and the next overlay, given the same F, reads it at startup and keeps the
+// window itself, while its intro plays (stretched to last as long as the
+// window does). The key that committed, pressed again before the deadline,
+// clicks the same spot again; any other key closes the window and goes to the
+// overlay as usual. The deadline is on the monotonic clock, which both
+// processes share, so a file from long ago is simply out of date.
+// Keys already in the channel when this overlay opened it, still to be read.
+// Only after a handoff: see key_channel_open.
+static bool key_channel_backlog    = false;
+static bool key_channel_in_backlog = false;
+
+static void handoff_write(struct state *state, xkb_keysym_t sym) {
+    char name[64];
+    if (state->current_output == NULL ||
+        xkb_keysym_get_name(sym, name, sizeof(name)) < 0) {
+        return;
+    }
+    FILE *file = fopen(state->handoff_file, "w");
+    if (file == NULL) {
+        return;
+    }
+    // Empty the key channel on the way out, so everything in it when the next
+    // overlay opens it was typed after this click (see key_channel_open).
+    const char *channel = getenv("WL_KBPTR_KEY_CHANNEL");
+    if (channel != NULL && *channel != 0) {
+        int fd = open(channel, O_WRONLY | O_TRUNC);
+        if (fd >= 0) {
+            close(fd);
+        }
+    }
+    // With a key channel, this overlay can still hear the second press after
+    // its surface is gone, so it keeps the window itself (handoff_watch) and
+    // the next overlay only swallows the key. That is the good case: the
+    // second click goes out the moment the key is pressed. Without one, the
+    // keyboard goes to the next overlay, and so does the second click.
+    state->handoff_detach = channel != NULL && *channel != 0;
+    state->handoff_commit_sym = sym;
+
+    const char *output = state->current_output->name;
+    fprintf(
+        file, "%s %s %d %d %lld %s\n", name, output ? output : "-",
+        state->result.x + state->result.w / 2,
+        state->result.y + state->result.h / 2,
+        (long long)(now_ms() + state->config.mode_click.double_click_ms),
+        state->handoff_detach ? "before" : "next"
+    );
+    fclose(file);
+}
+
+// Taken, not just read: one double click per click, however many overlays
+// come up inside the window.
+static void handoff_read(struct state *state) {
+    FILE *file = fopen(state->handoff_file, "r");
+    if (file == NULL) {
+        return;
+    }
+    char      name[64];
+    char      who[16];
+    long long deadline;
+    int       got = fscanf(
+        file, "%63s %63s %d %d %lld %15s", name, state->handoff_output,
+        &state->handoff_x, &state->handoff_y, &deadline, who
+    );
+    fclose(file);
+    unlink(state->handoff_file);
+
+    if (got != 6 || deadline <= now_ms()) {
+        return;
+    }
+    // "before": the overlay before is still listening and makes the second
+    // click itself; this one only keeps the key from reaching a mode.
+    state->handoff_swallow_only = strcmp(who, "before") == 0;
+    state->handoff_sym = xkb_keysym_from_name(name, XKB_KEYSYM_NO_FLAGS);
+    state->handoff_deadline_ms = deadline;
+}
+
+// A key pressed while a handed-off window may be open. True if it was the
+// second press of a double click and so is used up; false if it is the
+// overlay's as usual (and the window, if there was one, is now closed).
+static bool handoff_key(struct state *state, xkb_keysym_t sym, bool pressed) {
+    if (state->handoff_sym == XKB_KEY_NoSymbol) {
+        return false;
+    }
+    // A key from the backlog was typed while this overlay was starting, so
+    // inside the window whenever it is read: it is judged by when it was
+    // pressed, not by how long startup took.
+    if (!key_channel_in_backlog && now_ms() >= state->handoff_deadline_ms) {
+        state->handoff_sym = XKB_KEY_NoSymbol;
+        return false;
+    }
+    if (!pressed) {
+        return false;
+    }
+    bool again         = sym == state->handoff_sym;
+    state->handoff_sym = XKB_KEY_NoSymbol;
+    if (again && !state->handoff_swallow_only) {
+        state->handoff_clicks++;
+    }
+    return again;
 }
 
 // Where a click just went, for whoever else is drawing on the screen.
@@ -480,9 +612,19 @@ static off_t       key_channel_off  = 0;
 static void key_channel_open(struct state *state) {
     // Truncate: anything written before this overlay existed was meant for a
     // previous one, and replaying it would type into the wrong overlay.
-    int fd = open(key_channel_path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
-    if (fd >= 0) {
-        close(fd);
+    //
+    // Except after a double-click handoff. Then the overlay before emptied the
+    // channel itself as it clicked (handoff_write), so what is in it now was
+    // typed in the gap between the two -- which is exactly when the second
+    // press of a double click comes. It is kept, and read once the first mode
+    // is up to take it.
+    if (state->handoff_sym != XKB_KEY_NoSymbol) {
+        key_channel_backlog = true;
+    } else {
+        int fd = open(key_channel_path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+        if (fd >= 0) {
+            close(fd);
+        }
     }
 
     key_channel_fd = inotify_init1(IN_NONBLOCK | IN_CLOEXEC);
@@ -541,6 +683,9 @@ static void key_channel_handle_line(struct state *state, char *line) {
         }
         return;
     }
+    if (handoff_key(state, key_sym, pressed)) {
+        return;
+    }
 
     if (key_sym == XKB_KEY_space && !mode_takes_space(state)) {
         peek_set(state, pressed);
@@ -591,6 +736,81 @@ static void key_channel_drain(struct state *state) {
     close(fd);
 }
 
+// The double-click window, kept by an overlay that has already gone.
+//
+// Called in a child, after the surface is down and the first click is out, by
+// an overlay that handed its window on while there is a key channel to listen
+// to. The parent has exited, so the wrapper has already moved on and the next
+// overlay is coming up; this only watches the channel for the committing key
+// until the window closes. That key clicks the same spot again there and then
+// -- as fast as a single-lifetime double click, with no startup in between.
+// Anything else ends the watch: it is the next overlay's key.
+static void handoff_watch(struct state *state) {
+    int64_t deadline =
+        now_ms() + state->config.mode_click.double_click_ms;
+    key_channel_off = 0; // handoff_write emptied it
+
+    while (key_channel_fd >= 0) {
+        int64_t left = deadline - now_ms();
+        if (left <= 0) {
+            return;
+        }
+        struct pollfd pfd = {.fd = key_channel_fd, .events = POLLIN};
+        if (poll(&pfd, 1, (int)left) <= 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            return;
+        }
+
+        char buf[4096];
+        while (read(key_channel_fd, buf, sizeof(buf)) > 0) {}
+        int fd = open(key_channel_path, O_RDONLY | O_CLOEXEC);
+        if (fd < 0 || lseek(fd, key_channel_off, SEEK_SET) < 0) {
+            if (fd >= 0) {
+                close(fd);
+            }
+            return;
+        }
+        char    line[256];
+        size_t  len = 0;
+        ssize_t n;
+        while ((n = read(fd, buf, sizeof(buf))) > 0) {
+            key_channel_off += n;
+            for (ssize_t i = 0; i < n; i++) {
+                if (buf[i] != '\n') {
+                    if (len < sizeof(line) - 1) {
+                        line[len++] = buf[i];
+                    }
+                    continue;
+                }
+                line[len] = 0;
+                len       = 0;
+                // Releases say nothing about a second press.
+                if (line[0] == '-' || line[0] == 0) {
+                    continue;
+                }
+                xkb_keysym_t sym =
+                    xkb_keysym_from_name(line, XKB_KEYSYM_NO_FLAGS);
+                if (sym == XKB_KEY_NoSymbol) {
+                    sym = xkb_keysym_from_name(
+                        line, XKB_KEYSYM_CASE_INSENSITIVE
+                    );
+                }
+                close(fd);
+                if (sym == state->handoff_commit_sym) {
+                    int x = state->result.x + state->result.w / 2;
+                    int y = state->result.y + state->result.h / 2;
+                    move_pointer(state, x, y, state->click);
+                    report_click(state, x, y);
+                }
+                return;
+            }
+        }
+        close(fd);
+    }
+}
+
 static void handle_keyboard_key(
     void *data, struct wl_keyboard *keyboard, uint32_t serial, uint32_t time,
     uint32_t key, uint32_t key_state
@@ -608,6 +828,11 @@ static void handle_keyboard_key(
         if (key_state == WL_KEYBOARD_KEY_STATE_PRESSED) {
             double_click_key(seat->state, key_sym);
         }
+        return;
+    }
+    if (handoff_key(
+            seat->state, key_sym, key_state == WL_KEYBOARD_KEY_STATE_PRESSED
+        )) {
         return;
     }
 
@@ -1071,6 +1296,10 @@ static void print_usage() {
     puts(" --overrides-file=F  on SIGUSR1, rebuild the configuration as at");
     puts("                     launch, apply each section.key=value line of");
     puts("                     F on top, and redraw");
+    puts(" --double-click-handoff=F  don't hold the overlay up for a double");
+    puts("                     click: write what would make one to F and");
+    puts("                     exit; and at startup, take one left in F by the");
+    puts("                     overlay before, and keep its window instead");
 }
 
 // What the configuration was built from at launch, kept so --overrides-file
@@ -1171,6 +1400,7 @@ int main(int argc, char **argv) {
         // Anything but NoSymbol means the double-click window is open, so this
         // is what says it is not.
         .double_click_sym = XKB_KEY_NoSymbol,
+        .handoff_sym      = XKB_KEY_NoSymbol,
     };
 
     config_set_default(&state.config);
@@ -1191,6 +1421,7 @@ int main(int argc, char **argv) {
         {"modifiers", required_argument, 0, 'M'},
         {"modifiers-file", required_argument, 0, 'F'},
         {"overrides-file", required_argument, 0, 'Y'},
+        {"double-click-handoff", required_argument, 0, 'K'},
         {NULL, 0, NULL, 0}
     };
 
@@ -1313,6 +1544,10 @@ int main(int argc, char **argv) {
             state.overrides_file = optarg;
             break;
 
+        case 'K':
+            state.handoff_file = optarg;
+            break;
+
         default:
             LOG_ERR("Unknown argument.");
             config_free_values(&state.config);
@@ -1344,6 +1579,10 @@ int main(int argc, char **argv) {
         free(cli_configs);
     }
     cli_configs = NULL;
+
+    if (state.handoff_file != NULL) {
+        handoff_read(&state);
+    }
 
     if (state.config.general.home_row_keys != NULL) {
         state.home_row = state.config.general.home_row_keys;
@@ -1594,6 +1833,13 @@ int main(int argc, char **argv) {
             if (wl_display_dispatch_pending(state.wl_display) < 0) {
                 goto loop_done;
             }
+            if (state.running && key_channel_backlog &&
+                state.current_mode != NO_MODE_ENTERED) {
+                key_channel_backlog    = false;
+                key_channel_in_backlog = true;
+                key_channel_drain(&state);
+                key_channel_in_backlog = false;
+            }
             if (state.running && (fds[1].revents & POLLIN)) {
                 key_channel_drain(&state);
             }
@@ -1623,6 +1869,25 @@ int main(int argc, char **argv) {
                     state.result.y + state.result.h / 2
                 );
                 state.clicked = true;
+            }
+
+            // The second click of a double click the last overlay made the
+            // first of. Only on the output that click went to: the spot is in
+            // that output's coordinates.
+            // Not before the surface has found its output: until then there
+            // is nothing to aim with, and the click waits rather than being
+            // lost.
+            while (state.handoff_clicks > 0 && state.current_output != NULL) {
+                state.handoff_clicks--;
+                if (state.current_output->name != NULL &&
+                    strcmp(
+                        state.current_output->name, state.handoff_output
+                    ) == 0) {
+                    move_pointer(
+                        &state, state.handoff_x, state.handoff_y, state.click
+                    );
+                    report_click(&state, state.handoff_x, state.handoff_y);
+                }
             }
 
             // The window closed with nothing pressed in it: one click was all
@@ -1669,6 +1934,30 @@ int main(int argc, char **argv) {
                     &state, state.result.x + state.result.w / 2,
                     state.result.y + state.result.h / 2
                 );
+            }
+        }
+
+        // Handed the window on with a channel to hear it by: the parent
+        // exits now, successfully, so the wrapper puts the next overlay up;
+        // the child keeps the connection and the virtual pointer and waits
+        // out the window. Its own exit status goes to no one.
+        if (state.handoff_detach) {
+            fflush(stdout);
+            fflush(stderr);
+            pid_t pid = fork();
+            if (pid > 0) {
+                _exit(0);
+            }
+            if (pid == 0) {
+                setsid();
+                int null = open("/dev/null", O_RDWR);
+                if (null >= 0) {
+                    dup2(null, 0);
+                    dup2(null, 1);
+                    dup2(null, 2);
+                    close(null);
+                }
+                handoff_watch(&state);
             }
         }
     } else {

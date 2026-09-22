@@ -84,6 +84,7 @@ Then compare the files upstream touched with the map below.
 | Click twice when the committing key is pressed again | `config.*`, `main.c`, `state.h` | `mode_click.double_click_ms` (it also added `_radius`/`_color`, since removed) |
 | Say where each click went | `main.c` | `WL_KBPTR_CLICK_REPORT=<path>`: each click writes `<output> <x> <y> <ms>` there |
 | Draw nothing while the double-click window is open | `config.*`, `main.c` | The ring and its two options are gone; imthemousenow marks the click itself |
+| Turn the wheel from outside | `main.c`, `utils_wayland.*` | `--scroll=here\|X,Y`: a notch per `up`/`down`/`left`/`right` on stdin, `mods LIST` changes the held modifiers |
 | Reload the config on a signal | `main.c`, `state.h` | `--overrides-file=F`: on SIGUSR1, launch config plus F's `section.key=value` lines, redrawn |
 
 Upstream changes to files not in that table (`meson.build`, the protocols,

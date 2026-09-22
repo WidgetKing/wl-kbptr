@@ -566,3 +566,114 @@ void hold_pointer(
 
     zwlr_virtual_pointer_v1_destroy(virt_pointer);
 }
+
+// A scroll is a wheel turned under the pointer, one notch per command, with
+// the modifiers held for as long as it lasts: Ctrl held around a wheel is
+// what zooms a browser, Shift what turns it sideways in most toolkits. Unlike
+// a hold there is no button to guard, but there are modifiers, and the same
+// rule keeps them: one function holds them and lets go of them, and every way
+// out -- EOF, `stop`, a signal -- falls through to the same let-go.
+//
+// Commands, one per line: `up`, `down`, `left` or `right` turns the wheel one
+// notch that way; `mods LIST` lets go of what is held and holds LIST instead
+// (empty for nothing). Anything else ends the scroll.
+//
+// The pointer is only moved if a point was given. Without one the wheel turns
+// wherever the pointer already is, which is the whole of "scroll here".
+static volatile sig_atomic_t _scroll_stop = 0;
+
+static void _scroll_signal(int signal) {
+    (void)signal;
+    _scroll_stop = 1;
+}
+
+// What one notch of a real wheel reports, in surface units: libinput's 15
+// degrees per click, which clients treat as one line-ish step.
+#define SCROLL_NOTCH 15
+
+void scroll_pointer(
+    struct state *state, bool move, int32_t x, int32_t y, FILE *commands
+) {
+    if (!state->wl_virtual_pointer_mgr) {
+        return;
+    }
+
+    wl_display_roundtrip(state->wl_display);
+
+    struct zwlr_virtual_pointer_v1 *virt_pointer =
+        zwlr_virtual_pointer_manager_v1_create_virtual_pointer(
+            state->wl_virtual_pointer_mgr,
+            ((struct seat *)state->seats.next)->wl_seat
+        );
+
+    struct sigaction action = { .sa_handler = _scroll_signal };
+    sigemptyset(&action.sa_mask);
+    sigaction(SIGTERM, &action, NULL);
+    sigaction(SIGINT, &action, NULL);
+    sigaction(SIGHUP, &action, NULL);
+
+    if (move) {
+        int32_t  layout_x, layout_y;
+        uint32_t layout_width, layout_height;
+        _layout_box(state, &layout_x, &layout_y, &layout_width, &layout_height);
+        _motion_layout(
+            state, virt_pointer, x, y, layout_x, layout_y, layout_width,
+            layout_height
+        );
+    }
+
+    modifiers_down(state);
+
+    char line[256];
+    while (!_scroll_stop && fgets(line, sizeof(line), commands) != NULL) {
+        line[strcspn(line, "\r\n")] = '\0';
+
+        if (strncmp(line, "mods", 4) == 0 &&
+            (line[4] == '\0' || line[4] == ' ')) {
+            uint32_t modifiers;
+            if (parse_modifiers(line + 4, &modifiers) != 0) {
+                LOG_ERR("Could not parse '%s': keeping the modifiers.", line);
+                continue;
+            }
+            modifiers_up(state);
+            state->modifiers      = modifiers;
+            // Said here, so a --modifiers-file cannot overrule it.
+            state->modifiers_file = NULL;
+            modifiers_down(state);
+            continue;
+        }
+
+        uint32_t axis;
+        int      sign;
+        if (strcmp(line, "up") == 0) {
+            axis = WL_POINTER_AXIS_VERTICAL_SCROLL;
+            sign = -1;
+        } else if (strcmp(line, "down") == 0) {
+            axis = WL_POINTER_AXIS_VERTICAL_SCROLL;
+            sign = 1;
+        } else if (strcmp(line, "left") == 0) {
+            axis = WL_POINTER_AXIS_HORIZONTAL_SCROLL;
+            sign = -1;
+        } else if (strcmp(line, "right") == 0) {
+            axis = WL_POINTER_AXIS_HORIZONTAL_SCROLL;
+            sign = 1;
+        } else {
+            break;
+        }
+
+        // Said as a wheel, with a discrete step, rather than as a finger on a
+        // touchpad: a wheel notch is what a browser counts to zoom one level,
+        // and what a list moves by a fixed number of lines.
+        zwlr_virtual_pointer_v1_axis_source(
+            virt_pointer, WL_POINTER_AXIS_SOURCE_WHEEL
+        );
+        zwlr_virtual_pointer_v1_axis_discrete(
+            virt_pointer, 0, axis, wl_fixed_from_int(sign * SCROLL_NOTCH), sign
+        );
+        zwlr_virtual_pointer_v1_frame(virt_pointer);
+        wl_display_roundtrip(state->wl_display);
+    }
+
+    modifiers_up(state);
+    zwlr_virtual_pointer_v1_destroy(virt_pointer);
+}

@@ -1000,6 +1000,11 @@ static void print_usage() {
     puts(" --hold=X,Y          don't show an overlay: press at X,Y and hold");
     puts("                     it, moving to each 'x y' line read on stdin,");
     puts("                     releasing on EOF or 'release'");
+    puts(" --scroll=WHERE      don't show an overlay: turn the wheel under");
+    puts("                     the pointer, a notch per up/down/left/right");
+    puts("                     line on stdin; 'mods LIST' changes the held");
+    puts("                     modifiers. WHERE is 'here' or X,Y to move to");
+    puts("                     first, in layout coordinates");
     puts(" --drag=PATH         don't show an overlay: press, travel and");
     puts("                     release along x1,y1,x2,y2,duration_ms, in");
     puts("                     layout coordinates");
@@ -1126,6 +1131,7 @@ int main(int argc, char **argv) {
         {"only-print", no_argument, 0, 'p'},
         {"drag", required_argument, 0, 'D'},
         {"hold", required_argument, 0, 'L'},
+        {"scroll", required_argument, 0, 'S'},
         {"modifiers", required_argument, 0, 'M'},
         {"modifiers-file", required_argument, 0, 'F'},
         {"overrides-file", required_argument, 0, 'Y'},
@@ -1148,6 +1154,9 @@ int main(int argc, char **argv) {
     // for, because 0,0 is a real point.
     int  hold_x = 0, hold_y = 0;
     bool held = false;
+    // A scroll presses nothing, and may not move the pointer at all.
+    bool scrolling = false, scroll_move = false;
+    int  scroll_x = 0, scroll_y = 0;
     while ((option_char = getopt_long(
                 argc, argv, "hvr:o:c:O:RpD:L:M:", long_options, &option_index
             )) != -1) {
@@ -1219,6 +1228,18 @@ int main(int argc, char **argv) {
                 return 1;
             }
             held = true;
+            break;
+
+        case 'S':
+            scrolling = true;
+            if (strcmp(optarg, "here") == 0) {
+                break;
+            }
+            if (sscanf(optarg, "%d,%d", &scroll_x, &scroll_y) != 2) {
+                LOG_ERR("Could not parse --scroll argument.");
+                return 1;
+            }
+            scroll_move = true;
             break;
 
         case 'M':
@@ -1366,6 +1387,13 @@ int main(int argc, char **argv) {
     // A hold stops in the same place and for the same reasons, and is steered
     // from outside instead of planned in advance: stdin says where to go next
     // for as long as the button is down.
+    if (scrolling) {
+        scroll_pointer(&state, scroll_move, scroll_x, scroll_y, stdin);
+
+        config_free_values(&state.config);
+        return 0;
+    }
+
     if (held) {
         hold_pointer(
             &state, hold_x, hold_y, state.config.mode_click.button, stdin

@@ -97,6 +97,7 @@ PROBES=(
   --modifiers-file     # ...toggled while the overlay is up, no relaunch
   --overrides-file     # left and right switched while the overlay is up
   WL_KBPTR_CLICK_REPORT # where each click went, for the click effect
+  --scroll             # scroll mode, SUPER + ' and / in the overlay
 )
 for probe in "${PROBES[@]}"; do
   if grep -qa -- "$probe" "$BIN"; then ok "probe finds '$probe'"; else
@@ -145,6 +146,10 @@ rejects "--drag missing its duration" -O DP-9 --drag 100,200,900,700
 rejects "--drag with a negative duration" -O DP-9 --drag 100,200,900,700,-1
 accepts "--hold x,y" -O DP-9 --hold 640,360
 rejects "--hold with one coordinate" -O DP-9 --hold 640
+accepts "--scroll here" -O DP-9 --scroll here
+accepts "--scroll x,y" -O DP-9 --scroll 640,360
+rejects "--scroll with one coordinate" -O DP-9 --scroll 640
+accepts "--modifiers on a scroll" -O DP-9 --modifiers ctrl --scroll here
 # --modifiers, on every kind of press, and empty because the wrapper may pass
 # an empty list rather than leave the flag out.
 accepts "--modifiers on a click" -O DP-9 --modifiers ctrl,alt,shift,super -o modes=tile,click

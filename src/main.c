@@ -22,7 +22,9 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
+#include <signal.h>
 #include <sys/inotify.h>
+#include <sys/signalfd.h>
 #include <sys/mman.h>
 #include <time.h>
 #include <unistd.h>
@@ -1005,6 +1007,67 @@ static void print_usage() {
     puts("                     press: a click, a drag, a hold");
     puts(" --modifiers-file=F  read that list from F at each press instead,");
     puts("                     so it can change while the overlay is up");
+    puts(" --overrides-file=F  on SIGUSR1, rebuild the configuration as at");
+    puts("                     launch, apply each section.key=value line of");
+    puts("                     F on top, and redraw");
+}
+
+// What the configuration was built from at launch, kept so --overrides-file
+// can build it again from scratch: a reload is always "launch config plus the
+// file", never "whatever was last loaded plus the file", so an empty file
+// puts the launch config back.
+static char  *launch_config_filename = NULL;
+static char **launch_cli_configs     = NULL;
+static int    launch_num_cli_configs = 0;
+
+// Rebuilds the configuration and swaps it in. Anything that fails to parse
+// throws the whole attempt away: the config in force stays in force and one
+// error is logged, as --modifiers-file does. Only what is read afresh at each
+// frame or each press -- colours, the button, the double-click window --
+// changes what the overlay does; things read once at mode entry (label
+// symbols, the floating source) or at launch (the mode chain) stay as they
+// were.
+static void reload_overrides(struct state *state) {
+    struct config        fresh;
+    struct config_loader loader;
+    config_set_default(&fresh);
+    config_loader_init(&loader, &fresh);
+
+    bool ok = config_loader_load_file(&loader, launch_config_filename) == 0;
+    for (int i = 0; ok && i < launch_num_cli_configs; i++) {
+        ok = config_loader_load_cli_param(&loader, launch_cli_configs[i]) == 0;
+    }
+
+    FILE *f = ok ? fopen(state->overrides_file, "r") : NULL;
+    if (f != NULL) {
+        char   *line = NULL;
+        size_t  cap  = 0;
+        ssize_t len;
+        while (ok && (len = getline(&line, &cap, f)) >= 0) {
+            while (len > 0 && (line[len - 1] == '\n' || line[len - 1] == '\r')) {
+                line[--len] = '\0';
+            }
+            if (len > 0) {
+                ok = config_loader_load_cli_param(&loader, line) == 0;
+            }
+        }
+        free(line);
+        fclose(f);
+    }
+
+    if (!ok) {
+        LOG_ERR("Could not apply --overrides-file; keeping the configuration.");
+        config_free_values(&fresh);
+        return;
+    }
+
+    config_free_values(&state->config);
+    state->config = fresh;
+    // The one pointer into config that outlives a frame.
+    if (state->config.general.home_row_keys != NULL) {
+        state->home_row = state->config.general.home_row_keys;
+    }
+    request_frame(state);
 }
 
 static void print_version() {
@@ -1065,6 +1128,7 @@ int main(int argc, char **argv) {
         {"hold", required_argument, 0, 'L'},
         {"modifiers", required_argument, 0, 'M'},
         {"modifiers-file", required_argument, 0, 'F'},
+        {"overrides-file", required_argument, 0, 'Y'},
         {NULL, 0, NULL, 0}
     };
 
@@ -1168,6 +1232,10 @@ int main(int argc, char **argv) {
             state.modifiers_file = optarg;
             break;
 
+        case 'Y':
+            state.overrides_file = optarg;
+            break;
+
         default:
             LOG_ERR("Unknown argument.");
             config_free_values(&state.config);
@@ -1180,7 +1248,9 @@ int main(int argc, char **argv) {
         LOG_ERR("Failed to read configuration file.");
         return 1;
     }
-    if (config_filename != NULL) {
+    if (state.overrides_file != NULL) {
+        launch_config_filename = config_filename;
+    } else if (config_filename != NULL) {
         free(config_filename);
         config_filename = NULL;
     }
@@ -1190,7 +1260,12 @@ int main(int argc, char **argv) {
             return 1;
         }
     }
-    free(cli_configs);
+    if (state.overrides_file != NULL) {
+        launch_cli_configs     = cli_configs;
+        launch_num_cli_configs = num_cli_configs;
+    } else {
+        free(cli_configs);
+    }
     cli_configs = NULL;
 
     if (state.config.general.home_row_keys != NULL) {
@@ -1372,10 +1447,28 @@ int main(int argc, char **argv) {
         key_channel_open(&state);
     }
 
+    // SIGUSR1 means "reload the overrides", but only when asked for with
+    // --overrides-file. Without it the signal keeps its default action, as in
+    // a stock build, which is why the wrapper probes before sending it.
+    int signal_fd = -1;
+    if (state.overrides_file != NULL) {
+        sigset_t mask;
+        sigemptyset(&mask);
+        sigaddset(&mask, SIGUSR1);
+        if (sigprocmask(SIG_BLOCK, &mask, NULL) == 0) {
+            signal_fd = signalfd(-1, &mask, SFD_NONBLOCK | SFD_CLOEXEC);
+        }
+        if (signal_fd < 0) {
+            LOG_ERR("Could not listen for SIGUSR1; overrides will not reload.");
+        }
+    }
+
     {
-        struct pollfd fds[2] = {
+        // A -1 fd is ignored by poll, so all three are always passed.
+        struct pollfd fds[3] = {
             {.fd = wl_display_get_fd(state.wl_display), .events = POLLIN},
             {.fd = key_channel_fd, .events = POLLIN},
+            {.fd = signal_fd, .events = POLLIN},
         };
 
         while (state.running) {
@@ -1398,7 +1491,7 @@ int main(int argc, char **argv) {
                 timeout      = left > 0 ? (int)left : 0;
             }
 
-            if (poll(fds, key_channel_fd < 0 ? 1 : 2, timeout) < 0) {
+            if (poll(fds, 3, timeout) < 0) {
                 wl_display_cancel_read(state.wl_display);
                 if (errno == EINTR) {
                     continue;
@@ -1419,6 +1512,16 @@ int main(int argc, char **argv) {
             }
             if (state.running && (fds[1].revents & POLLIN)) {
                 key_channel_drain(&state);
+            }
+            if (state.running && (fds[2].revents & POLLIN)) {
+                struct signalfd_siginfo info;
+                bool                    got = false;
+                while (read(signal_fd, &info, sizeof(info)) == sizeof(info)) {
+                    got = true;
+                }
+                if (got) {
+                    reload_overrides(&state);
+                }
             }
 
             // Clicks are emitted here rather than by the key handler that

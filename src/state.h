@@ -175,6 +175,10 @@ struct state {
     // without relaunching the overlay (which is a visible flicker). Missing
     // or empty means none; unparseable keeps `modifiers`.
     const char                    *modifiers_file;
+    // --overrides-file: config lines applied over the launch config each time
+    // SIGUSR1 arrives, so the wrapper can switch left and right click, tint
+    // and all, without relaunching. NULL leaves SIGUSR1 alone.
+    const char                    *overrides_file;
 };
 
 #endif

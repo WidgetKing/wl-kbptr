@@ -95,6 +95,7 @@ PROBES=(
   double_click_ms      # double click by pressing again, 0007
   --modifiers          # a click with Ctrl, Alt, Shift or Super held
   --modifiers-file     # ...toggled while the overlay is up, no relaunch
+  --overrides-file     # left and right switched while the overlay is up
   WL_KBPTR_CLICK_REPORT # where each click went, for the click effect
 )
 for probe in "${PROBES[@]}"; do
@@ -153,6 +154,7 @@ accepts "--modifiers on a hold" -O DP-9 --modifiers shift,super --hold 640,360
 rejects "--modifiers with a name it does not know" -O DP-9 --modifiers ctrl,hyper
 accepts "--modifiers with spaces, as the session writes them" -O DP-9 --modifiers 'ctrl alt'
 accepts "--modifiers-file, even one that is not there yet" -O DP-9 --modifiers-file /nonexistent/modifiers
+accepts "--overrides-file, even one that is not there yet" -O DP-9 --overrides-file /nonexistent/o -o modes=tile,click
 
 # --- 5. against a real imthemousenow ---------------------------------------------
 # The same questions, asked by the wrapper itself: its probes see this build

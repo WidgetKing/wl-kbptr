@@ -81,7 +81,9 @@ Then compare the files upstream touched with the map below.
 | Say a drag path in layout coordinates | `main.c`, `utils_wayland.*` | Drag across monitors |
 | Dim the overlay while a key is held | `config.*`, `main.c`, `mode*.c/h`, `state.h` | Peek: `general.peek_alpha`, key release on the channel |
 | Hold a button down and be steered | `main.c`, `utils_wayland.*` | `--hold x,y` |
-| Click twice when the committing key is pressed again | `config.*`, `main.c`, `state.h` | `mode_click.double_click_ms`/`_radius`/`_color` |
+| Click twice when the committing key is pressed again | `config.*`, `main.c`, `state.h` | `mode_click.double_click_ms` (it also added `_radius`/`_color`, since removed) |
+| Say where each click went | `main.c` | `WL_KBPTR_CLICK_REPORT=<path>`: each click writes `<output> <x> <y> <ms>` there |
+| Draw nothing while the double-click window is open | `config.*`, `main.c` | The ring and its two options are gone; imthemousenow marks the click itself |
 
 Upstream changes to files not in that table (`meson.build`, the protocols,
 `config.example`, other modes) almost never conflict. Changes to `main.c` and

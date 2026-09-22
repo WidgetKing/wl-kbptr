@@ -38,61 +38,23 @@ static int64_t now_ms(void) {
     return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 }
 
-// What is on screen while the double-click window is open.
+// What is on screen while the double-click window is open: nothing.
 //
-// The overlay is not: a selection has been made and clicked, and leaving the
-// labels up would hide the very thing just clicked -- which is also the thing
-// you are deciding whether to click again. So the surface is cleared to
-// nothing and a ring is drawn around the selection instead. It is the only
-// sign that the keyboard is still being listened to, and it sits where the eye
-// already is.
+// A selection has been made and clicked, and leaving the overlay up would hide
+// the very thing just clicked -- which is also the thing you are deciding
+// whether to click again. So the surface is cleared and left clear, and marking
+// the spot is someone else's business: imthemousenow draws that itself, told
+// where the click went by WL_KBPTR_CLICK_REPORT (see report_click).
 //
-// Three rings of falling alpha, which is how bin/imthemousenow-halo draws the
-// pointer during a hold. A hold and a double-click window are the same kind of
-// moment -- the desktop looks normal while the keyboard does not mean what it
-// usually does -- so they are drawn the same way.
-static void render_double_click_ring(struct state *state, cairo_t *cairo) {
-    struct mode_click_config *config = &state->config.mode_click;
-
-    // Buffers are recycled, so the destination still holds the last frame
-    // drawn into it -- the whole overlay. Nothing here covers it, so it has to
-    // be cleared rather than drawn over.
+// Buffers are recycled, so the destination still holds the last frame drawn
+// into it -- the whole overlay -- and has to be cleared rather than just not
+// drawn over.
+static void render_double_click_window(cairo_t *cairo) {
     cairo_save(cairo);
     cairo_set_operator(cairo, CAIRO_OPERATOR_SOURCE);
     cairo_set_source_rgba(cairo, 0, 0, 0, 0);
     cairo_paint(cairo);
     cairo_restore(cairo);
-
-    // cairo_paint() clears the pixels, not the path. The context comes back
-    // around with the buffer, and the frame before this one was the whole
-    // overlay -- whose labels were drawn with cairo_show_text(), which leaves
-    // a current point sitting wherever the last one ended. Left there, the
-    // first cairo_arc() below joins it to the ring with a straight line.
-    cairo_new_path(cairo);
-
-    double cx = state->result.x + state->result.w / 2.0;
-    double cy = state->result.y + state->result.h / 2.0;
-
-    for (int i = 0; i < 3; i++) {
-        double radius = config->double_click_radius * (1.0 - i * 0.22);
-        if (radius <= 0) {
-            break;
-        }
-
-        uint32_t color = config->double_click_color;
-        uint32_t alpha = (color & 0xff) / (i + 1);
-        cairo_set_source_u32(cairo, (color & 0xffffff00) | alpha);
-        cairo_set_line_width(cairo, 2);
-        // And the same hazard once per ring: an arc is appended to whatever
-        // path is already there, so it needs a sub-path of its own rather than
-        // a line drawn to it from the end of the last one. cairo_stroke()
-        // happens to clear the path each time round, which makes this look
-        // redundant -- it is not, it is what makes the arc independent of
-        // anything drawn before it.
-        cairo_new_sub_path(cairo);
-        cairo_arc(cairo, cx, cy, radius, 0, 2 * M_PI);
-        cairo_stroke(cairo);
-    }
 }
 
 static void send_frame(struct state *state) {
@@ -118,7 +80,7 @@ static void send_frame(struct state *state) {
     cairo_identity_matrix(cairo);
     cairo_scale(cairo, scale_120 / 120.0, scale_120 / 120.0);
     if (state->double_click_sym != XKB_KEY_NoSymbol) {
-        render_double_click_ring(state, cairo);
+        render_double_click_window(cairo);
     } else if (state->peeking) {
         // Peek: draw the overlay into a group and composite the whole thing at
         // a low alpha, so what is underneath can be read through it. Done here

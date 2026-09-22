@@ -422,9 +422,7 @@ static struct section_def section_defs[] = {
     ),
     SECTION(
         mode_click, MC_FIELD(button, "left", parse_click, noop),
-        MC_FIELD(double_click_ms, "0", parse_int, noop),
-        MC_FIELD(double_click_color, "#89b4faee", parse_color, noop),
-        MC_FIELD(double_click_radius, "22", parse_double, noop)
+        MC_FIELD(double_click_ms, "0", parse_int, noop)
     ),
 };
 #pragma GCC diagnostic pop

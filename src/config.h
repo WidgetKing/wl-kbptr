@@ -92,12 +92,6 @@ struct mode_click_config {
     // double-click time of whatever is being clicked, because the second click
     // goes out when the key is pressed rather than when the window closes.
     int      double_click_ms;
-    // The ring drawn around the selection for as long as that window is open.
-    // The overlay itself is gone by then -- it would hide the thing just
-    // clicked -- so the ring is the only sign that the keyboard is still being
-    // listened to.
-    uint32_t double_click_color;
-    double   double_click_radius;
 };
 
 struct config {

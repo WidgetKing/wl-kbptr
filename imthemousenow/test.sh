@@ -109,11 +109,6 @@ done
 accepts "general.peek_alpha" -o general.peek_alpha=0.1
 accepts "general.peek_alpha at 1 (off)" -o general.peek_alpha=1
 accepts "mode_click.double_click_ms" -o mode_click.double_click_ms=400
-accepts "mode_click.double_click_radius" -o mode_click.double_click_radius=12
-accepts "mode_click.double_click_color" -o 'mode_click.double_click_color=#7aa2f7ee'
-accepts "all three double-click options together" \
-  -o mode_click.double_click_ms=400 -o mode_click.double_click_radius=12 \
-  -o 'mode_click.double_click_color=#7aa2f7ee'
 accepts "an ACTION's tint on every mode" \
   -o 'mode_tile.label_select_color=#f7768eff' \
   -o 'mode_tile.selectable_border_color=#f7768eaa' \
@@ -135,8 +130,6 @@ peek_alpha=0.1
 
 [mode_click]
 double_click_ms=400
-double_click_radius=12
-double_click_color=#7aa2f7ee
 EOF
 accepts "the patched keys in a config file" -c "$WORK/config"
 

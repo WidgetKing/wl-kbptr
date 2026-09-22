@@ -86,6 +86,8 @@ Then compare the files upstream touched with the map below.
 | Draw nothing while the double-click window is open | `config.*`, `main.c` | The ring and its two options are gone; imthemousenow marks the click itself |
 | Turn the wheel from outside | `main.c`, `utils_wayland.*` | `--scroll=here\|X,Y`: a notch per `up`/`down`/`left`/`right` on stdin, `mods LIST` changes the held modifiers |
 | Reload the config on a signal | `main.c`, `state.h` | `--overrides-file=F`: on SIGUSR1, launch config plus F's `section.key=value` lines, redrawn |
+| Bring the overlay in through a transition | `transition.*` (new), `config.*`, `main.c`, `state.h`, `meson.build` | `general.intro`/`intro_ms`/`intro_chunk`: the overlay arrives as `bytes` or `scanline`, drawn in `send_frame` |
+| Hand the double-click window on across a relaunch | `main.c`, `state.h` | `--double-click-handoff=F`: a continuous run's click exits at once; a forked child (with a key channel) or the next overlay keeps the window |
 
 Upstream changes to files not in that table (`meson.build`, the protocols,
 `config.example`, other modes) almost never conflict. Changes to `main.c` and

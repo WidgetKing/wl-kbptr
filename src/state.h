@@ -147,6 +147,12 @@ struct state {
     int                            current_mode;
     enum click                     click;
     bool                           peeking;
+    // When the first real frame went out, which is when the intro starts. 0
+    // until then.
+    int64_t                        intro_start_ms;
+    // The transition picked for this overlay, and the seed it plays with.
+    const struct transition       *intro;
+    uint32_t                       intro_seed;
     // The double-click window. `double_click_sym` is the key that committed
     // the selection, and its being anything but NoSymbol is what says the
     // window is open: the selection is made, its click is out, and the overlay

@@ -262,6 +262,10 @@ static int parse_str(void *dest, char *value) {
     return 0;
 }
 
+static int parse_transition_set(void *dest, char *value) {
+    return transition_set_parse(dest, value);
+}
+
 static int parse_floating_mode_source_value(void *dest, char *value) {
     enum floating_mode_source *out = dest;
     if (strcmp(value, "stdin") == 0) {
@@ -368,7 +372,10 @@ static struct section_def section_defs[] = {
         G_FIELD(home_row_keys, "", parse_home_row_keys, free_home_row_keys),
         G_FIELD(modes, "tile,bisect", parse_str, free_str),
         G_FIELD(cancellation_status_code, "0", parse_uint8, noop),
-        G_FIELD(peek_alpha, "1", parse_double, noop)
+        G_FIELD(peek_alpha, "1", parse_double, noop),
+        G_FIELD(intro, "none", parse_transition_set, noop),
+        G_FIELD(intro_ms, "250", parse_int, noop),
+        G_FIELD(intro_chunk, "48", parse_int, noop)
     ),
     SECTION(
         mode_tile, MT_FIELD(label_color, "#fffd", parse_color, noop),

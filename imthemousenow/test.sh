@@ -98,6 +98,8 @@ PROBES=(
   --overrides-file     # left and right switched while the overlay is up
   WL_KBPTR_CLICK_REPORT # where each click went, for the click effect
   --scroll             # scroll mode, SUPER + ' and / in the overlay
+  intro_ms             # the overlay arriving through a transition
+  intro_chunk          # ...and how big its pieces are
 )
 for probe in "${PROBES[@]}"; do
   if grep -qa -- "$probe" "$BIN"; then ok "probe finds '$probe'"; else
@@ -110,6 +112,12 @@ done
 # from: colours are a theme's #rrggbb with an alpha on the end.
 accepts "general.peek_alpha" -o general.peek_alpha=0.1
 accepts "general.peek_alpha at 1 (off)" -o general.peek_alpha=1
+accepts "general.intro=bytes" -o general.intro=bytes -o general.intro_ms=500
+accepts "general.intro=none (off)" -o general.intro=none
+accepts "general.intro=random" -o general.intro=random -o general.intro_ms=250 -o general.intro_chunk=64
+accepts "general.intro as a list" -o general.intro=bytes,scanline
+rejects "general.intro with one bad name in a list" -o general.intro=bytes,imthemousenow_no_such_transition
+rejects "general.intro that no build has" -o general.intro=imthemousenow_no_such_transition
 accepts "mode_click.double_click_ms" -o mode_click.double_click_ms=400
 accepts "an ACTION's tint on every mode" \
   -o 'mode_tile.label_select_color=#f7768eff' \

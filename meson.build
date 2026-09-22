@@ -59,6 +59,7 @@ sources = [
   'src/utils_wayland.c',
   'src/config.c',
   'src/label.c',
+  'src/transition.c',
   protos_src,
 ]
 

@@ -21,6 +21,7 @@
 #include <string.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <math.h>
 #include <poll.h>
 #include <signal.h>
 #include <sys/inotify.h>
@@ -59,6 +60,45 @@ static void render_double_click_window(cairo_t *cairo) {
     cairo_restore(cairo);
 }
 
+static void send_frame(struct state *state);
+
+static void surface_callback_done(
+    void *data, struct wl_callback *callback, uint32_t callback_data
+) {
+    struct state *state = data;
+    // Let go of this callback first, so the frame drawn next can ask for
+    // another one while an intro is running.
+    wl_callback_destroy(state->wl_surface_callback);
+    state->wl_surface_callback = NULL;
+
+    send_frame(state);
+}
+
+const struct wl_callback_listener surface_callback_listener = {
+    .done = surface_callback_done,
+};
+
+// Ask to be told when to draw next. Takes effect at the next commit.
+static void arm_frame_callback(struct state *state) {
+    if (state->wl_surface_callback != NULL) {
+        return;
+    }
+
+    state->wl_surface_callback = wl_surface_frame(state->wl_surface);
+    wl_callback_add_listener(
+        state->wl_surface_callback, &surface_callback_listener, state
+    );
+}
+
+static void request_frame(struct state *state) {
+    if (state->wl_surface_callback != NULL) {
+        return;
+    }
+
+    arm_frame_callback(state);
+    wl_surface_commit(state->wl_surface);
+}
+
 static void send_frame(struct state *state) {
     int32_t scale_120 = state->fractional_scale;
     if (scale_120 == 0) {
@@ -81,14 +121,31 @@ static void send_frame(struct state *state) {
     cairo_t *cairo = surface_buffer->cairo;
     cairo_identity_matrix(cairo);
     cairo_scale(cairo, scale_120 / 120.0, scale_120 / 120.0);
+    // How far in the intro is, or 1 if it is over or there is none. The clock
+    // starts at the first real frame, not at launch, so none of it is spent
+    // waiting for the compositor -- and it starts one frame in, so that first
+    // frame already shows something: at exactly 0 it would be blank, and a
+    // blank frame reads as the overlay being slow to open.
+    double intro_t = 1;
+    const struct general_config *general = &state->config.general;
+    if (general->intro.count > 0 && general->intro_ms > 0) {
+        if (state->intro_start_ms == 0) {
+            state->intro_start_ms = now_ms() - 16;
+            state->intro_seed     = (uint32_t)now_ms();
+            state->intro =
+                general->intro.items[state->intro_seed % general->intro.count];
+        }
+        intro_t = (double)(now_ms() - state->intro_start_ms) / general->intro_ms;
+    }
+    bool arriving = intro_t < 1;
+
     if (state->double_click_sym != XKB_KEY_NoSymbol) {
         render_double_click_window(cairo);
-    } else if (state->peeking) {
-        // Peek: draw the overlay into a group and composite the whole thing at
-        // a low alpha, so what is underneath can be read through it. Done here
-        // rather than by scaling every colour because it is the *overlay* that
-        // is being faded, not one of its parts -- dimming, labels, borders and
-        // the bisect pointer all go together, and no mode has to know.
+    } else if (state->peeking || arriving) {
+        // Peek and the intro both change how the *whole* overlay is shown, not
+        // one of its parts: draw it into a group, then composite that -- at a
+        // low alpha to see through it, through a transition while it arrives,
+        // or both. No mode has to know.
         //
         // Buffers are recycled, so the destination still holds the last frame
         // drawn into it. A mode normally overwrites every pixel of it; a group
@@ -102,8 +159,27 @@ static void send_frame(struct state *state) {
 
         cairo_push_group(cairo);
         mode_render(state, cairo);
-        cairo_pop_group_to_source(cairo);
-        cairo_paint_with_alpha(cairo, state->config.general.peek_alpha);
+        cairo_pattern_t *overlay = cairo_pop_group(cairo);
+
+        if (arriving) {
+            cairo_push_group(cairo);
+            // Eased out: most of it arrives early, and the last of it
+            // settles, which is what makes the start feel immediate.
+            double eased = 1 - (1 - intro_t) * (1 - intro_t);
+            state->intro->draw(
+                cairo, overlay, eased, state->surface_width,
+                state->surface_height, fmax(4, general->intro_chunk),
+                state->intro_seed
+            );
+            cairo_pattern_destroy(overlay);
+            overlay = cairo_pop_group(cairo);
+        }
+
+        cairo_set_source(cairo, overlay);
+        cairo_paint_with_alpha(
+            cairo, state->peeking ? state->config.general.peek_alpha : 1
+        );
+        cairo_pattern_destroy(overlay);
     } else {
         mode_render(state, cairo);
     }
@@ -117,6 +193,12 @@ static void send_frame(struct state *state) {
     wl_surface_damage(
         state->wl_surface, 0, 0, state->surface_width, state->surface_height
     );
+    // Still arriving: ask for the next frame in the same commit, and keep
+    // asking until the intro is over. After that frames are drawn on change
+    // only, as before.
+    if (arriving) {
+        arm_frame_callback(state);
+    }
     wl_surface_commit(state->wl_surface);
 }
 
@@ -142,32 +224,6 @@ static void send_transparent_frame(struct state *state) {
         state->wp_viewport, state->surface_width, state->surface_height
     );
     wl_surface_damage(state->wl_surface, 0, 0, 1, 1);
-    wl_surface_commit(state->wl_surface);
-}
-
-static void surface_callback_done(
-    void *data, struct wl_callback *callback, uint32_t callback_data
-) {
-    struct state *state = data;
-    send_frame(state);
-
-    wl_callback_destroy(state->wl_surface_callback);
-    state->wl_surface_callback = NULL;
-}
-
-const struct wl_callback_listener surface_callback_listener = {
-    .done = surface_callback_done,
-};
-
-static void request_frame(struct state *state) {
-    if (state->wl_surface_callback != NULL) {
-        return;
-    }
-
-    state->wl_surface_callback = wl_surface_frame(state->wl_surface);
-    wl_callback_add_listener(
-        state->wl_surface_callback, &surface_callback_listener, state
-    );
     wl_surface_commit(state->wl_surface);
 }
 

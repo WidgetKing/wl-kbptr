@@ -3,6 +3,7 @@
 #ifndef __CONFIG_H_INCLUDED__
 #define __CONFIG_H_INCLUDED__
 
+#include "transition.h"
 #include "utils.h"
 
 #include <stdint.h>
@@ -15,6 +16,12 @@ struct general_config {
     // the peek: the overlay is already fully drawn, so holding the key has
     // nothing to do.
     double peek_alpha;
+    // How the overlay arrives: one of these, picked at random each time,
+    // over intro_ms, broken into pieces intro_chunk logical pixels across.
+    // An empty set (`none`) or an intro_ms of 0 puts it up whole, as before.
+    struct transition_set intro;
+    int                   intro_ms;
+    int                   intro_chunk;
 };
 
 struct relative_font_size {

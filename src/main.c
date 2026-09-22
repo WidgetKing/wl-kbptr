@@ -279,6 +279,38 @@ static void double_click_key(struct state *state, xkb_keysym_t sym) {
     state->running = false;
 }
 
+// Where a click just went, for whoever else is drawing on the screen.
+//
+// imthemousenow marks every click with an effect of its own, drawn by a
+// separate process that has no way to see the click happen. With
+// WL_KBPTR_CLICK_REPORT=<path> set, each click this run makes rewrites that
+// file with one line:
+//
+//     <output name> <x> <y> <ms>
+//
+// x and y are in the output's own logical coordinates -- the space the overlay
+// surface and move_pointer() both work in -- and ms is a monotonic timestamp,
+// so the second click of a double click, landing on the same spot, is still a
+// change a watcher can see. Unset, nothing is written; a failed write is not
+// an error either, since the click itself has already gone out.
+static void report_click(struct state *state, int x, int y) {
+    const char *path = getenv("WL_KBPTR_CLICK_REPORT");
+    if (path == NULL || *path == 0 || state->current_output == NULL) {
+        return;
+    }
+
+    FILE *file = fopen(path, "w");
+    if (file == NULL) {
+        return;
+    }
+    const char *name = state->current_output->name;
+    fprintf(
+        file, "%s %d %d %lld\n", name ? name : "-", x, y,
+        (long long)now_ms()
+    );
+    fclose(file);
+}
+
 bool compute_initial_area(struct state *state, struct rect *initial_area) {
     if (initial_area->w == -1) {
         initial_area->x = 0;
@@ -1437,6 +1469,10 @@ int main(int argc, char **argv) {
                     &state, state.result.x + state.result.w / 2,
                     state.result.y + state.result.h / 2, state.click
                 );
+                report_click(
+                    &state, state.result.x + state.result.w / 2,
+                    state.result.y + state.result.h / 2
+                );
                 state.clicked = true;
             }
 
@@ -1478,6 +1514,13 @@ int main(int argc, char **argv) {
                 &state, state.result.x + state.result.w / 2,
                 state.result.y + state.result.h / 2, state.click
             );
+            // A run that only moves the pointer has not clicked anything.
+            if (state.click != CLICK_NONE) {
+                report_click(
+                    &state, state.result.x + state.result.w / 2,
+                    state.result.y + state.result.h / 2
+                );
+            }
         }
     } else {
         status_code = state.config.general.cancellation_status_code;

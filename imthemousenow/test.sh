@@ -53,7 +53,7 @@ ok "builds"
 export HOME="$WORK/home" XDG_CONFIG_HOME="$WORK/home/.config" \
   XDG_RUNTIME_DIR="$WORK/run" WAYLAND_DISPLAY="imthemousenow-test-no-such-display"
 mkdir -p "$HOME" "$XDG_RUNTIME_DIR"
-unset WL_KBPTR_KEY_CHANNEL
+unset WL_KBPTR_KEY_CHANNEL WL_KBPTR_CLICK_REPORT
 
 CONNECT="Failed to connect to Wayland compositor"
 
@@ -95,6 +95,7 @@ PROBES=(
   double_click_ms      # double click by pressing again, 0007
   --modifiers          # a click with Ctrl, Alt, Shift or Super held
   --modifiers-file     # ...toggled while the overlay is up, no relaunch
+  WL_KBPTR_CLICK_REPORT # where each click went, for the click effect
 )
 for probe in "${PROBES[@]}"; do
   if grep -qa -- "$probe" "$BIN"; then ok "probe finds '$probe'"; else

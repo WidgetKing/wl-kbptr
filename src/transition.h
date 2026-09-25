@@ -25,7 +25,7 @@ struct transition {
     );
 };
 
-#define MAX_TRANSITIONS 8
+#define MAX_TRANSITIONS 16
 
 // The transitions one is picked from. Empty is `none`.
 struct transition_set {

@@ -120,12 +120,11 @@ accepts "general.intro as a list" -o general.intro=bytes,scanline
 # Every transition name the plugin offers, one at a time: a rename in
 # src/transition.c that the plugin has not heard of is a config this build
 # rejects, and a rejected config takes every chord down, not just the intro.
-for _transition in bytes dither interlace warmup scanline dropout roll beam \
-                   flicker shuffle squeeze; do
+for _transition in bytes interlace scanline dropout roll beam shuffle; do
   accepts "general.intro=$_transition" -o "general.intro=$_transition"
 done
 accepts "general.intro as a long list" \
-  -o general.intro=bytes,dither,interlace,warmup,scanline,dropout,roll,beam,flicker,shuffle,squeeze
+  -o general.intro=bytes,interlace,scanline,dropout,roll,beam,shuffle
 rejects "general.intro with one bad name in a list" -o general.intro=bytes,imthemousenow_no_such_transition
 rejects "general.intro that no build has" -o general.intro=imthemousenow_no_such_transition
 accepts "mode_click.double_click_ms" -o mode_click.double_click_ms=400

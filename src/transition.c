@@ -102,39 +102,6 @@ static void draw_bytes(
     paint_cells(cairo, overlay, w, h, chunk, chunk, level_bytes, &r);
 }
 
-// Dither: the same squares, but in the order an ordered-dither pattern fills
-// in rather than at random -- so the overlay arrives as a crosshatch that
-// thickens, the way a 1-bit paint program fills a region. The seed only turns
-// the matrix, because a Bayer pattern shuffled is just noise again.
-static const unsigned char bayer8[64] = {
-    0,  32, 8,  40, 2,  34, 10, 42, 48, 16, 56, 24, 50, 18, 58, 26,
-    12, 44, 4,  36, 14, 46, 6,  38, 60, 28, 52, 20, 62, 30, 54, 22,
-    3,  35, 11, 43, 1,  33, 9,  41, 51, 19, 59, 27, 49, 17, 57, 25,
-    15, 47, 7,  39, 13, 45, 5,  37, 63, 31, 55, 23, 61, 29, 53, 21,
-};
-
-static double level_dither(int x, int y, void *ctx) {
-    const struct reveal *r = ctx;
-    // Four quarter-turns of the matrix, one per overlay, so the crosshatch
-    // does not grow out of the same corner every time.
-    int turn = r->seed & 3;
-    int i    = turn & 1 ? y : x;
-    int j    = turn & 1 ? x : y;
-    if (turn & 2) {
-        i = 7 - (i & 7);
-    }
-    double threshold = (bayer8[(j & 7) * 8 + (i & 7)] + 0.5) / 64.0;
-    return threshold < r->t ? 1 : 0;
-}
-
-static void draw_dither(
-    cairo_t *cairo, cairo_pattern_t *overlay, double t, double w, double h,
-    double chunk, uint32_t seed
-) {
-    struct reveal r = {.t = t, .seed = seed};
-    paint_cells(cairo, overlay, w, h, chunk, chunk, level_dither, &r);
-}
-
 // Interlace: one field then the other, each sweeping down the screen the way
 // the beam does. Every other line is there before its neighbour is, which is
 // the thing a CRT did that nothing since does.
@@ -160,31 +127,6 @@ static void draw_interlace(
     paint_cells(cairo, overlay, w, h, w, band, level_interlace, &r);
 }
 
-// Warmup: the phosphor coming up to brightness. The same squares as bytes, but
-// each climbs through a few fixed levels instead of snapping on -- and they are
-// fixed levels, not a ramp, because a smooth fade is what this whole family of
-// transitions exists to avoid.
-static double level_warmup(int x, int y, void *ctx) {
-    const struct reveal *r = ctx;
-    // Each cell's own window: it starts when its turn comes and takes a third
-    // of the intro to get there.
-    double local = (r->t - cell_noise(x, y, r->seed) * 0.7) / 0.3;
-    if (local <= 0) {
-        return 0;
-    }
-    static const double steps[] = {0.2, 0.45, 0.75, 1};
-    int                 n       = (int)(sizeof(steps) / sizeof(steps[0]));
-    int                 i       = (int)(local * n);
-    return steps[i >= n ? n - 1 : i];
-}
-
-static void draw_warmup(
-    cairo_t *cairo, cairo_pattern_t *overlay, double t, double w, double h,
-    double chunk, uint32_t seed
-) {
-    struct reveal r = {.t = t, .seed = seed};
-    paint_cells(cairo, overlay, w, h, chunk, chunk, level_warmup, &r);
-}
 
 // Scanline: the overlay arrives in horizontal bands, each thrown sideways by
 // its own amount and settling into place, the way a picture does when the
@@ -323,36 +265,6 @@ static void draw_beam(
     }
 }
 
-// Flicker: the overlay is all there from the first frame, and the supply is
-// what is not settled -- it gutters through a few fixed levels with a ghost
-// image beside it that closes in. The gentle one: nothing is ever missing, so
-// a label can be read through the whole of it.
-static void draw_flicker(
-    cairo_t *cairo, cairo_pattern_t *overlay, double t, double w, double h,
-    double chunk, uint32_t seed
-) {
-    (void)w;
-    (void)h;
-    static const double levels[] = {0.3, 1, 0.45, 1, 0.65, 1, 0.9, 1, 1};
-    int                 n        = (int)(sizeof(levels) / sizeof(levels[0]));
-    int                 i        = (int)(t * n);
-    double              alpha    = levels[i >= n ? n - 1 : i];
-
-    // The ghost: one or two cells off, on the side the seed picks, pulled in
-    // as the picture settles.
-    double off = snap((1 - t) * chunk * 2, chunk);
-    if (off > 0) {
-        cairo_save(cairo);
-        cairo_translate(cairo, (seed & 1) ? off : -off, (seed & 2) ? chunk : 0);
-        cairo_set_source(cairo, overlay);
-        cairo_paint_with_alpha(cairo, alpha * 0.4);
-        cairo_restore(cairo);
-    }
-
-    cairo_set_source(cairo, overlay);
-    cairo_paint_with_alpha(cairo, alpha);
-}
-
 // Shuffle: the picture assembled out of the wrong pieces. Most of it is in
 // place; a scattering of cells show what belongs somewhere else, and the
 // scattering shrinks and comes right. The loudest of them, and the only one
@@ -413,52 +325,14 @@ static void draw_shuffle(
     }
 }
 
-// Squeeze: switching the set on. The picture is a bright line across the middle
-// of the screen that opens out to its full height, in whole bands, with no
-// smoothing anywhere -- so it grows in steps the way it would on a panel whose
-// rows are its rows.
-static void draw_squeeze(
-    cairo_t *cairo, cairo_pattern_t *overlay, double t, double w, double h,
-    double chunk, uint32_t seed
-) {
-    (void)seed;
-    double band = fmax(2, chunk / 4);
-    // Never fully shut: at the first frame it is one band of very compressed
-    // picture, which is the point, but it is never nothing.
-    double open = fmax(band / h, t);
-    double half = snap(h * 0.5 * open, band) + band;
-
-    // NEAREST, or the squeeze is the one soft thing in a set of hard-edged
-    // transitions. Put back after, because the caller composites this pattern
-    // again once the intro is over.
-    cairo_filter_t was = cairo_pattern_get_filter(overlay);
-    cairo_pattern_set_filter(overlay, CAIRO_FILTER_NEAREST);
-
-    cairo_save(cairo);
-    cairo_rectangle(cairo, 0, h / 2 - half, w, half * 2);
-    cairo_clip(cairo);
-    cairo_translate(cairo, 0, h / 2);
-    cairo_scale(cairo, 1, open);
-    cairo_translate(cairo, 0, -h / 2);
-    cairo_set_source(cairo, overlay);
-    cairo_paint(cairo);
-    cairo_restore(cairo);
-
-    cairo_pattern_set_filter(overlay, was);
-}
-
 static const struct transition transitions[] = {
     {"bytes",     draw_bytes    },
-    {"dither",    draw_dither   },
     {"interlace", draw_interlace},
-    {"warmup",    draw_warmup   },
     {"scanline",  draw_scanline },
     {"dropout",   draw_dropout  },
     {"roll",      draw_roll     },
     {"beam",      draw_beam     },
-    {"flicker",   draw_flicker  },
     {"shuffle",   draw_shuffle  },
-    {"squeeze",   draw_squeeze  },
 };
 
 #define NUM_TRANSITIONS (sizeof(transitions) / sizeof(transitions[0]))
@@ -492,8 +366,8 @@ int transition_set_parse(struct transition_set *out, const char *value) {
         if (found == NULL) {
             LOG_ERR(
                 "Invalid transition '%s'. Should be 'none', 'random', or a "
-                "comma-separated list of: bytes, dither, interlace, warmup, "
-                "scanline, dropout, roll, beam, flicker, shuffle, squeeze.",
+                "comma-separated list of: bytes, interlace, scanline, "
+                "dropout, roll, beam, shuffle.",
                 name
             );
             free(copy);

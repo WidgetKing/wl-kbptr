@@ -9,10 +9,12 @@ click, one crash fix.
 
 ## Branches
 
-- `imthemousenow` -- **what gets installed.** imthemousenow's `install.sh`
-  builds the tip of this branch, on every machine, at the next install or
-  update. Upstream's history up to tag `pin/<commit>`, imthemousenow's commits
-  on top.
+- `imthemousenow` -- **where what gets installed comes from.** imthemousenow's
+  `install.sh` builds one commit of this branch: the one `commit` in
+  `../imthemousenow/pkg/source.toml` names (the *install pin*, not to be
+  confused with the `pin/<commit>` tag below). `./install.sh --branch
+  imthemousenow` builds its tip. Upstream's history up to tag `pin/<commit>`,
+  imthemousenow's commits on top.
 - `main` -- a mirror of upstream (`upstream/main`). Never commit to it.
 - `work/<name>` -- where every change is made. See below.
 - `drill/rebase-onto-main` -- a rehearsal of moving the pin, kept for the
@@ -24,8 +26,12 @@ by choice.
 
 ## Never experiment on `imthemousenow`
 
-A commit pushed to `imthemousenow` is what the next install everywhere builds.
-So no change is made on it directly, however small. Every change goes:
+A push to `imthemousenow` is not live on its own: installs build the commit the
+install pin names, and nobody gets a fork change until that moves. But the
+install pin has to name a commit on this branch, so whatever is on it is what
+the next pin bump ships everywhere -- and what anyone building the branch with
+`--branch imthemousenow` gets today. So no change is made on it directly,
+however small. Every change goes:
 
 1. **Branch off it.** `git switch -c work/<name> imthemousenow`
 2. **Make the change there**, as one commit per change, with a message that
@@ -49,9 +55,13 @@ So no change is made on it directly, however small. Every change goes:
    git push origin --delete work/<name>
    ```
    Fast-forward only, so the branch stays one commit per change with no merge
-   commits. Then a plain `./install.sh --dev` in imthemousenow installs it.
+   commits.
+7. **Move the install pin** to the new tip: `commit` in
+   `../imthemousenow/pkg/source.toml`, committed there. Until then nothing
+   installs it -- a plain `./install.sh --dev` in imthemousenow still builds
+   the old commit. After it, that plain run installs the change.
 
-To abandon a work branch, a plain `./install.sh --dev` puts the real branch
+To abandon a work branch, a plain `./install.sh --dev` puts the pinned commit
 back; delete the work branch when done with it.
 
 Moving to a newer upstream uses the same procedure; the next section says how

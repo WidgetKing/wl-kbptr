@@ -98,6 +98,7 @@ Then compare the files upstream touched with the map below.
 | Reload the config on a signal | `main.c`, `state.h` | `--overrides-file=F`: on SIGUSR1, launch config plus F's `section.key=value` lines, redrawn |
 | Bring the overlay in through a transition | `transition.*` (new), `config.*`, `main.c`, `state.h`, `meson.build` | `general.intro`/`intro_ms`/`intro_chunk`: the overlay arrives as `bytes` or `scanline`, drawn in `send_frame` |
 | Hand the double-click window on across a relaunch | `main.c`, `state.h` | `--double-click-handoff=F`: a continuous run's click exits at once; a forked child (with a key channel) or the next overlay keeps the window |
+| Make the eighth bisect key m, not the key right of l | `main.c` | `load_home_row`: keycode `0x3a` (m) where upstream had `0x2f` (`;` on QWERTY) under a `// m` comment; imthemousenow owns `;` while an overlay is up |
 
 Upstream changes to files not in that table (`meson.build`, the protocols,
 `config.example`, other modes) almost never conflict. Changes to `main.c` and

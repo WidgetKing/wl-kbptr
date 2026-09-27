@@ -513,7 +513,11 @@ static void load_home_row(
         0x2c, // j
         0x2d, // k
         0x2e, // l
-        0x2f, // m
+        // m, as the comment always said. Upstream has 0x2f here, which is the
+        // key right of l -- `;` on QWERTY -- and imthemousenow binds `;` in the
+        // compositor for as long as an overlay is up, so the eighth cell of
+        // an eight-way bisect could never be picked.
+        0x3a, // m
         0x2a, // g
         0x2b, // h
         0x38, // b
